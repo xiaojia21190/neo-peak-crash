@@ -34,7 +34,7 @@ const LinuxDoProvider = {
   clientId: process.env.LINUXDO_CLIENT_ID,
   clientSecret: process.env.LINUXDO_CLIENT_SECRET,
   // 禁用 PKCE - Linux DO OAuth 服务器不支持
-  checks: ["state"] as const,
+  checks: ["state"] as ("state" | "none" | "pkce")[],
   profile(profile: {
     id: number;
     username: string;

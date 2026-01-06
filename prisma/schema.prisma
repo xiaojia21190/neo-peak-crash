@@ -1,0 +1,117 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// 用户模型 - 存储 Linux DO 用户信息
+model User {
+  id         String  @id // Linux DO 用户 ID
+  username   String  @unique
+  name       String?
+  avatar     String?
+  trustLevel Int     @default(0)
+  active     Boolean @default(true)
+  silenced   Boolean @default(false)
+
+  // 余额信息
+  balance     Decimal @default(0) @db.Decimal(18, 2) // LDC 余额
+  playBalance Decimal @default(10000) @db.Decimal(18, 2) // 游戏模式余额
+
+  // 统计信息
+  totalWins   Int     @default(0)
+  totalLosses Int     @default(0)
+  totalBets   Int     @default(0)
+  totalProfit Decimal @default(0) @db.Decimal(18, 2)
+
+  // 时间戳
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  lastLoginAt DateTime @default(now())
+
+  // 关联
+  bets         Bet[]
+  transactions Transaction[]
+
+  @@map("users")
+}
+
+// 投注记录模型
+model Bet {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 投注信息
+  amount     Decimal @db.Decimal(18, 2) // 投注金额
+  multiplier Decimal @db.Decimal(10, 4) // 目标倍率
+  rowIndex   Int // 行索引
+  colIndex   Int // 列索引
+
+  // 结果
+  isWin  Boolean @default(false)
+  payout Decimal @default(0) @db.Decimal(18, 2) // 实际赔付
+
+  // 游戏信息
+  asset      String // 交易对 (如 BTCUSDT)
+  roundHash  String? // 回合哈希
+  isPlayMode Boolean @default(false) // 是否为游戏模式
+
+  // 时间戳
+  createdAt DateTime  @default(now())
+  settledAt DateTime? // 结算时间
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("bets")
+}
+
+// 交易记录模型 (充值/提现)
+model Transaction {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 交易信息
+  type   TransactionType
+  amount Decimal           @db.Decimal(18, 2)
+  status TransactionStatus @default(PENDING)
+
+  // 支付信息
+  orderNo String? @unique // 订单号
+  tradeNo String? // 第三方交易号
+
+  // 备注
+  remark String?
+
+  // 时间戳
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  @@index([userId])
+  @@index([orderNo])
+  @@map("transactions")
+}
+
+enum TransactionType {
+  RECHARGE // 充值
+  WITHDRAW // 提现
+  BET_WIN // 投注赢
+  BET_LOSE // 投注输
+}
+
+enum TransactionStatus {
+  PENDING // 待处理
+  COMPLETED // 已完成
+  FAILED // 失败
+  CANCELLED // 已取消
+}
