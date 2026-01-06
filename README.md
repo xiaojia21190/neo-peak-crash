@@ -70,8 +70,12 @@ pnpm dev
 1. 访问 [Linux DO Connect](https://connect.linux.do)
 2. 点击 **我的应用接入** → **申请新接入**
 3. 填写应用信息
-4. **回调地址**: `https://your-domain.com/api/auth/callback/linux-do`
+4. **回调地址**:
+   - 开发环境: `http://localhost:3000/api/auth/callback/linux-do`
+   - 生产环境: `https://your-domain.com/api/auth/callback/linux-do`
 5. 获取 `Client ID` 和 `Client Secret`
+
+> ⚠️ **注意**: OAuth 回调地址必须完全匹配，`localhost` 和 `127.0.0.1` 是不同的域名。
 
 ### LDC 支付配置
 
@@ -81,6 +85,18 @@ pnpm dev
    - **异步通知 URL**: `https://your-domain.com/api/payment/notify`
    - **同步跳转 URL**: `https://your-domain.com/?recharge=success`
 4. 获取 `pid` (Client ID) 和 `key` (Secret)
+
+> ⚠️ **重要**: 支付回调地址必须是**公网可访问**的 HTTPS 地址，不能使用 `127.0.0.1` 或 `localhost`。
+>
+> **本地开发测试支付功能**，请使用内网穿透工具：
+> ```bash
+> # 使用 ngrok
+> ngrok http 3000
+>
+> # 使用 localtunnel
+> npx localtunnel --port 3000
+> ```
+> 然后使用生成的公网地址配置回调。
 
 ## 🔧 环境变量说明
 

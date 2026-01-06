@@ -33,6 +33,8 @@ const LinuxDoProvider = {
   },
   clientId: process.env.LINUXDO_CLIENT_ID,
   clientSecret: process.env.LINUXDO_CLIENT_SECRET,
+  // 禁用 PKCE - Linux DO OAuth 服务器不支持
+  checks: ["state"] as const,
   profile(profile: {
     id: number;
     username: string;
@@ -116,6 +118,27 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   },
   // Vercel 部署必需：信任代理主机
   trustHost: true,
+  // Cookie 配置 - 解决 PKCE 验证问题
+  cookies: {
+    pkceCodeVerifier: {
+      name: "next-auth.pkce.code_verifier",
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: process.env.NODE_ENV === "production",
+      },
+    },
+    state: {
+      name: "next-auth.state",
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: process.env.NODE_ENV === "production",
+      },
+    },
+  },
 });
 
 // 导出类型
