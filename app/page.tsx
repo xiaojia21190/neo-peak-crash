@@ -1,9 +1,19 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { GameStatus, Candlestick, GridBet, GameState, StreakState, GameEngineState } from "./types";
-import { INITIAL_BALANCE, COUNTDOWN_TIME, CENTER_ROW_INDEX, calculateMultiplier, PRICE_SENSITIVITY } from "./constants";
+import { useSession } from "next-auth/react";
+import { GameStatus, GridBet, GameState, GameEngineState } from "./types";
+import { COUNTDOWN_TIME, CENTER_ROW_INDEX, calculateMultiplier, PRICE_SENSITIVITY, HOUSE_EDGE } from "./constants";
 import GameChart from "@/components/GameChart";
+import { RechargeModal } from "@/components/RechargeModal";
+import { useToast } from "@/components/Toast";
+import { TutorialModal } from "@/components/TutorialModal";
+import { GameStats } from "@/components/GameStats";
+import { BetHistoryPanel } from "@/components/BetHistoryPanel";
+import { WinCelebration, ModeSwitchOverlay, LoseAnimation } from "@/components/Animations";
+import { Header } from "@/components/Header";
+import { Footer } from "@/components/Footer";
+import { useAudio, useBybitWebSocket, useGameBalance } from "@/hooks";
 
 // HIT TOLERANCE:
 // Relaxed intersection logic based on user feedback (0.8 area).
@@ -15,14 +25,6 @@ const HIT_TOLERANCE = 0.4;
 const generateHash = () => {
   return Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
 };
-
-// Interface for the raw WebSocket data (Generic Trade Data)
-interface TradeData {
-  s: string; // Symbol
-  p: string; // Price
-  q: string; // Quantity/Volume
-  T: number; // Trade Time
-}
 
 // Helper: Linear Interpolation to get displayed multiplier value from Row Index
 // Updated to support infinite rows
@@ -41,14 +43,40 @@ const getMultiplierAtRow = (rowIndex: number): number => {
 };
 
 const App: React.FC = () => {
+  // Toast 通知
+  const { showToast } = useToast();
+
+  // 用户会话
+  const { data: session, status: sessionStatus } = useSession();
+  const user = session?.user as
+    | {
+        id?: string;
+        name?: string;
+        username?: string;
+        trustLevel?: number;
+        provider?: string;
+      }
+    | undefined;
+  const isLoggedIn = sessionStatus === "authenticated" && user?.provider === "linux-do";
+
+  // 使用自定义 Hooks
+  const { isMusicPlaying, toggleMusic, playSound } = useAudio();
+  const { isPlayMode, ldcBalance, playBalance, currentBalance, setCurrentBalance, toggleGameMode, resetPlayBalance, setLdcBalance, isRechargeModalOpen, setIsRechargeModalOpen } = useGameBalance({ userId: user?.id, isLoggedIn, showToast });
+
+  // 资产选择
+  const [selectedAsset, setSelectedAsset] = useState<string>("ETH");
+
+  // WebSocket 连接
+  const { realPrice, lastTrade, connectionError, latestPriceRef } = useBybitWebSocket(selectedAsset);
+
   // 1. REACT STATE: Only for UI updates (Text, Balance, Status) - Updates at low FPS (e.g., 10fps)
   const [gameState, setGameState] = useState<GameState>({
     currentMultiplier: calculateMultiplier(Math.floor(CENTER_ROW_INDEX), CENTER_ROW_INDEX, 0),
     currentRowIndex: CENTER_ROW_INDEX,
     status: GameStatus.WAITING,
     history: [],
-    balance: INITIAL_BALANCE,
-    sessionPL: 9.63,
+    balance: 0, // 将使用 ldcBalance 替代
+    sessionPL: 0,
     activeBets: [],
     candles: [],
     countdown: COUNTDOWN_TIME,
@@ -69,318 +97,48 @@ const App: React.FC = () => {
   });
 
   const [stakeAmount, setStakeAmount] = useState<number>(5.0);
-  const [realPrice, setRealPrice] = useState<number>(0);
-  const [selectedAsset, setSelectedAsset] = useState<string>("ETH");
-  const [lastTrade, setLastTrade] = useState<TradeData | null>(null);
   const [startPrice, setStartPrice] = useState<number>(0);
-  const [isMusicPlaying, setIsMusicPlaying] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [clockOffset, setClockOffset] = useState<number | null>(null);
+
+  // 教程弹窗状态
+  const [isTutorialOpen, setIsTutorialOpen] = useState(false);
+
+  // 游戏统计
+  const [totalBets, setTotalBets] = useState(0);
+  const [totalWins, setTotalWins] = useState(0);
+  const [totalLosses, setTotalLosses] = useState(0);
+
+  // 下注历史
+  interface BetHistoryItem {
+    id: string;
+    time: number;
+    multiplier: number;
+    stake: number;
+    result: "win" | "loss" | "pending";
+    payout: number;
+  }
+  const [betHistory, setBetHistory] = useState<BetHistoryItem[]>([]);
+
+  // 动画状态
+  const [showWinCelebration, setShowWinCelebration] = useState(false);
+  const [winAmount, setWinAmount] = useState(0);
+  const [winMultiplier, setWinMultiplier] = useState(0);
+  const [showLoseAnimation, setShowLoseAnimation] = useState(false);
+
+  // 首次访问显示教程
+  useEffect(() => {
+    const tutorialCompleted = localStorage.getItem("tutorial_completed");
+    if (!tutorialCompleted) {
+      // 延迟显示，等待页面加载完成
+      const timer = setTimeout(() => {
+        setIsTutorialOpen(true);
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   const startTimeRef = useRef<number>(0);
   const candleCounterRef = useRef<number>(0);
-  const latestPriceRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0); // For throttling UI updates
-
-  // Audio Context Ref
-  const audioCtxRef = useRef<AudioContext | null>(null);
-
-  // Background Music Ref
-  const bgmRef = useRef<{
-    oscillators: OscillatorNode[];
-    masterGain: GainNode;
-    lfo: OscillatorNode;
-  } | null>(null);
-
-  // Background Music Control
-  const toggleMusic = useCallback(() => {
-    if (isMusicPlaying) {
-      // Stop Sequence
-      if (bgmRef.current) {
-        const { oscillators, lfo, masterGain } = bgmRef.current;
-        const now = audioCtxRef.current?.currentTime || 0;
-
-        // Fade out
-        masterGain.gain.cancelScheduledValues(now);
-        masterGain.gain.setValueAtTime(masterGain.gain.value, now);
-        masterGain.gain.exponentialRampToValueAtTime(0.001, now + 1);
-
-        setTimeout(() => {
-          oscillators.forEach((o) => o.stop());
-          lfo.stop();
-        }, 1000);
-      }
-      bgmRef.current = null;
-      setIsMusicPlaying(false);
-    } else {
-      // Start Sequence
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === "suspended") ctx.resume();
-
-      const now = ctx.currentTime;
-      const masterGain = ctx.createGain();
-      masterGain.gain.value = 0;
-      masterGain.connect(ctx.destination);
-
-      // Fade in
-      masterGain.gain.linearRampToValueAtTime(0.15, now + 2); // Keep volume atmospheric (low)
-
-      // Filter for "Underwater/Cyberpunk" feel
-      const filter = ctx.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.value = 400;
-      filter.Q.value = 2;
-      filter.connect(masterGain);
-
-      // LFO to modulate filter (Breathing effect)
-      const lfo = ctx.createOscillator();
-      lfo.type = "sine";
-      lfo.frequency.value = 0.2; // Slow breathing
-      const lfoGain = ctx.createGain();
-      lfoGain.gain.value = 300;
-      lfo.connect(lfoGain);
-      lfoGain.connect(filter.frequency);
-      lfo.start();
-
-      // Oscillators (Blade Runner style Drone)
-      // Using detuned Sawtooth waves for a thick, gritty sound
-      const osc1 = ctx.createOscillator();
-      osc1.type = "sawtooth";
-      osc1.frequency.value = 65.41; // C2
-
-      const osc2 = ctx.createOscillator();
-      osc2.type = "sawtooth";
-      osc2.frequency.value = 65.8; // Detuned C2 for phasing
-
-      const osc3 = ctx.createOscillator(); // Sub bass
-      osc3.type = "sine";
-      osc3.frequency.value = 32.7; // C1
-
-      [osc1, osc2, osc3].forEach((osc) => {
-        osc.connect(filter);
-        osc.start();
-      });
-
-      bgmRef.current = { oscillators: [osc1, osc2, osc3], lfo, masterGain };
-      setIsMusicPlaying(true);
-    }
-  }, [isMusicPlaying]);
-
-  // Clean up music on unmount
-  useEffect(() => {
-    return () => {
-      if (bgmRef.current) {
-        bgmRef.current.oscillators.forEach((o) => o.stop());
-        bgmRef.current.lfo.stop();
-      }
-    };
-  }, []);
-
-  // Sound Effects Manager
-  const playSound = useCallback((type: "bet" | "win" | "lose" | "crash") => {
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx.state === "suspended") ctx.resume();
-
-      const t = ctx.currentTime;
-      const gain = ctx.createGain();
-      gain.connect(ctx.destination);
-
-      if (type === "bet") {
-        // High blip
-        gain.gain.setValueAtTime(0.08, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
-
-        const osc = ctx.createOscillator();
-        osc.connect(gain);
-        osc.frequency.setValueAtTime(2000, t);
-        osc.frequency.exponentialRampToValueAtTime(1200, t + 0.1);
-        osc.start(t);
-        osc.stop(t + 0.1);
-      } else if (type === "win") {
-        // Positive chime
-        gain.gain.setValueAtTime(0.12, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.6);
-
-        const osc = ctx.createOscillator();
-        osc.connect(gain);
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(880, t); // A5
-        osc.frequency.setValueAtTime(1760, t + 0.1); // A6
-        osc.start(t);
-        osc.stop(t + 0.6);
-
-        const osc2 = ctx.createOscillator();
-        const gain2 = ctx.createGain();
-        osc2.connect(gain2);
-        gain2.connect(ctx.destination);
-        gain2.gain.setValueAtTime(0.05, t);
-        gain2.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-        osc2.frequency.setValueAtTime(2200, t);
-        osc2.start(t);
-        osc2.stop(t + 0.3);
-      } else if (type === "lose") {
-        // Low muted error
-        gain.gain.setValueAtTime(0.1, t);
-        gain.gain.linearRampToValueAtTime(0.001, t + 0.15);
-
-        const osc = ctx.createOscillator();
-        osc.connect(gain);
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.linearRampToValueAtTime(80, t + 0.15);
-        osc.start(t);
-        osc.stop(t + 0.15);
-      } else if (type === "crash") {
-        // Power down slide
-        gain.gain.setValueAtTime(0.2, t); // Louder for crash
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.8);
-
-        const osc = ctx.createOscillator();
-        osc.connect(gain);
-        osc.type = "sawtooth";
-        osc.frequency.setValueAtTime(300, t);
-        osc.frequency.exponentialRampToValueAtTime(30, t + 0.8);
-        osc.start(t);
-        osc.stop(t + 0.8);
-
-        // Add noise burst for crash impact
-        const bufferSize = ctx.sampleRate * 0.5; // 0.5 sec noise
-        const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) {
-          data[i] = Math.random() * 2 - 1;
-        }
-        const noise = ctx.createBufferSource();
-        noise.buffer = buffer;
-        const noiseGain = ctx.createGain();
-        noiseGain.gain.setValueAtTime(0.1, t);
-        noiseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
-        noise.connect(noiseGain);
-        noiseGain.connect(ctx.destination);
-        noise.start(t);
-      }
-    } catch (e) {
-      console.error("Audio error:", e);
-    }
-  }, []);
-
-  // --- 1. WebSocket Connection (Bybit V5) ---
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let pingInterval: ReturnType<typeof setTimeout>;
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let isMounted = true;
-
-    setConnectionError(null);
-    setClockOffset(null);
-
-    const connect = () => {
-      // Bybit V5 Public Linear Endpoint (Mainnet)
-      const url = "wss://stream.bybit.com/v5/public/linear";
-
-      console.log(`Connecting to Bybit V5 stream (${url}) for ${selectedAsset}...`);
-
-      try {
-        ws = new WebSocket(url);
-
-        ws.onopen = () => {
-          if (!isMounted) return;
-          console.log(`Connected to Bybit Stream - ${selectedAsset}`);
-          setConnectionError(null);
-
-          // Bybit V5 Subscription Logic
-          // Topic format: publicTrade.{symbol}
-          const topic = `publicTrade.${selectedAsset}USDT`;
-          const subscribeMsg = {
-            op: "subscribe",
-            args: [topic],
-          };
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(subscribeMsg));
-          }
-
-          // Start Heartbeat (Bybit requires ping every 20s)
-          pingInterval = setInterval(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ op: "ping" }));
-            }
-          }, 20000);
-        };
-
-        ws.onmessage = (event) => {
-          if (!isMounted) return;
-          try {
-            const data = JSON.parse(event.data);
-
-            // Handle Pong
-            if (data.op === "pong") return;
-
-            // Handle Trade Data
-            // Bybit V5 format: { topic: "publicTrade.BTCUSDT", data: [ { p: "...", v: "...", ... } ] }
-            if (data.topic && data.topic.startsWith("publicTrade") && data.data && data.data.length > 0) {
-              // We take the last trade in the batch as the latest
-              const trade = data.data[data.data.length - 1];
-
-              const price = parseFloat(trade.p);
-              const tradeTime = parseInt(trade.T);
-
-              setRealPrice(price);
-              latestPriceRef.current = price;
-              setLastTrade({
-                s: trade.s,
-                p: trade.p,
-                q: trade.v, // In Bybit V5, 'v' is volume/size
-                T: tradeTime,
-              });
-
-              // CLOCK SYNC LOGIC
-              setClockOffset((prev) => {
-                if (prev === null) {
-                  const offset = Date.now() - tradeTime;
-                  console.log(`Clock Sync: Local time is ${offset}ms diff from Bybit. Calibrating...`);
-                  return offset;
-                }
-                return prev;
-              });
-            }
-          } catch (err) {
-            console.error("Error parsing WS message", err);
-          }
-        };
-
-        ws.onclose = (e) => {
-          if (!isMounted) return;
-          clearInterval(pingInterval);
-          console.log("Bybit Stream Closed. Code:", e.code);
-          setConnectionError("Reconnecting...");
-          reconnectTimeout = setTimeout(connect, 3000);
-        };
-
-        ws.onerror = (e) => {
-          console.warn("WebSocket Connection Error encountered.");
-        };
-      } catch (e) {
-        console.error("Failed to create WebSocket", e);
-        setConnectionError("Socket Creation Failed");
-      }
-    };
-
-    connect();
-
-    return () => {
-      isMounted = false;
-      clearInterval(pingInterval);
-      clearTimeout(reconnectTimeout);
-      if (ws) ws.close();
-    };
-  }, [selectedAsset]); // Removed 'region' dependency as Bybit uses a global endpoint
 
   // --- 2. Game Loop Control ---
   const startRound = useCallback(() => {
@@ -541,6 +299,46 @@ const App: React.FC = () => {
             if (newWins > 0) playSound("win");
             if (newLosses > 0) playSound("lose");
 
+            // 更新统计和历史
+            if (newWins > 0) {
+              setTotalWins((prev) => prev + newWins);
+              // 更新历史记录中的胜利
+              let totalWinPayout = 0;
+              let maxMultiplier = 0;
+              engine.activeBets.forEach((bet) => {
+                if (bet.isTriggered) {
+                  const betPayout = bet.amount * bet.targetMultiplier;
+                  totalWinPayout += betPayout;
+                  if (bet.targetMultiplier > maxMultiplier) {
+                    maxMultiplier = bet.targetMultiplier;
+                  }
+                  setBetHistory((prev) => prev.map((h) => (h.id === bet.id ? { ...h, result: "win" as const, payout: betPayout } : h)));
+                }
+              });
+              // 触发胜利庆祝动画
+              if (totalWinPayout > 0) {
+                setWinAmount(totalWinPayout);
+                setWinMultiplier(maxMultiplier);
+                setShowWinCelebration(true);
+              }
+            }
+            if (newLosses > 0) {
+              setTotalLosses((prev) => prev + newLosses);
+              // 更新历史记录中的失败
+              engine.activeBets.forEach((bet) => {
+                if (bet.isLost) {
+                  setBetHistory((prev) => prev.map((h) => (h.id === bet.id ? { ...h, result: "loss" as const, payout: bet.amount } : h)));
+                }
+              });
+              // 触发失败动画
+              setShowLoseAnimation(true);
+            }
+
+            // Update balance on win (根据模式更新对应余额)
+            if (payout > 0) {
+              setCurrentBalance((prev: number) => prev + payout);
+            }
+
             setGameState((prev) => {
               // Streaks update logic
               let currentStreak = prev.streaks[selectedAsset] || { type: "NONE", count: 0 };
@@ -559,7 +357,7 @@ const App: React.FC = () => {
                 // but we do it loosely so non-chart components might see it.
                 // Ideally, UI shouldn't depend on heavy candle array.
                 activeBets: [...engine.activeBets],
-                balance: prev.balance + payout,
+                balance: currentBalance + payout,
                 sessionPL: prev.sessionPL + payout,
                 streaks: { ...prev.streaks, [selectedAsset]: currentStreak },
               };
@@ -573,7 +371,7 @@ const App: React.FC = () => {
 
     animationFrame = requestAnimationFrame(update);
     return () => cancelAnimationFrame(animationFrame);
-  }, [gameState.status, startPrice, playSound, selectedAsset]);
+  }, [gameState.status, startPrice, playSound, selectedAsset, currentBalance, setCurrentBalance]);
 
   // Countdown
   useEffect(() => {
@@ -590,6 +388,12 @@ const App: React.FC = () => {
     (multiplier: number, timePoint: number, rowIndex: number) => {
       if (engineRef.current.status === GameStatus.CRASHED) return;
 
+      // 游玩模式不需要登录，真实模式需要登录
+      if (!isPlayMode && !isLoggedIn) {
+        showToast("请先登录 Linux DO 账号", "warning");
+        return;
+      }
+
       const currentTime = engineRef.current.currentTime;
 
       if (timePoint + 0.5 < currentTime) return;
@@ -599,12 +403,20 @@ const App: React.FC = () => {
       if (exists) return;
 
       // Check Balance
-      if (gameState.balance < stakeAmount) return;
+      if (currentBalance < stakeAmount) {
+        if (isPlayMode) {
+          showToast("游玩余额不足，点击重置按钮恢复余额", "error");
+        } else {
+          showToast("LDC 余额不足，请先充值", "error");
+        }
+        return;
+      }
 
       playSound("bet");
 
+      const betId = Math.random().toString();
       const newBet: GridBet = {
-        id: Math.random().toString(),
+        id: betId,
         targetMultiplier: multiplier,
         rowIndex: rowIndex,
         amount: stakeAmount,
@@ -616,33 +428,33 @@ const App: React.FC = () => {
       // Update Engine Immediately
       engineRef.current.activeBets.push(newBet);
 
+      // Update Balance (根据模式更新对应余额)
+      setCurrentBalance((prev: number) => prev - stakeAmount);
+
+      // 记录下注历史
+      setTotalBets((prev) => prev + 1);
+      setBetHistory((prev) => [
+        ...prev,
+        {
+          id: betId,
+          time: Date.now(),
+          multiplier: multiplier,
+          stake: stakeAmount,
+          result: "pending" as const,
+          payout: 0,
+        },
+      ]);
+
       // Update UI
       setGameState((prev) => ({
         ...prev,
-        balance: prev.balance - stakeAmount,
+        balance: currentBalance - stakeAmount,
         sessionPL: prev.sessionPL - stakeAmount,
         activeBets: [...prev.activeBets, newBet],
       }));
     },
-    [gameState.balance, stakeAmount, playSound]
+    [currentBalance, setCurrentBalance, stakeAmount, playSound, isLoggedIn, isPlayMode, showToast]
   );
-
-  const getAssetName = (symbol: string) => {
-    switch (symbol) {
-      case "BTC":
-        return "Bitcoin";
-      case "ETH":
-        return "Ethereum";
-      case "SOL":
-        return "Solana";
-      case "XRP":
-        return "Ripple";
-      case "DOGE":
-        return "Dogecoin";
-      default:
-        return symbol;
-    }
-  };
 
   const streak = gameState.streaks[selectedAsset] || { type: "NONE", count: 0 };
 
@@ -652,95 +464,22 @@ const App: React.FC = () => {
   return (
     <div className="min-w-[1280px] min-h-[720px] h-screen w-full flex flex-col bg-[#0d0d12] text-white font-sans overflow-hidden">
       {/* Header */}
-      <header className="flex justify-between items-center px-8 py-4 bg-[#0d0d12] border-b border-white/5 z-50 shadow-2xl">
-        <div className="flex items-center gap-10">
-          <div className="flex items-center gap-2 group cursor-pointer">
-            <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-600/30 group-hover:scale-105 transition-all">
-              <span className="font-black text-xs italic">P</span>
-            </div>
-            <span className="font-black text-xs tracking-[0.2em] uppercase italic opacity-80">PingooTread</span>
-          </div>
-          <nav className="flex gap-2 p-1.5 bg-white/5 rounded-2xl border border-white/5">
-            {["BTC", "ETH", "SOL", "XRP", "DOGE"].map((asset) => (
-              <button
-                key={asset}
-                onClick={() => {
-                  if (gameState.status !== GameStatus.RUNNING) {
-                    setSelectedAsset(asset);
-                    // Visual feedback of reconnection
-                    setRealPrice(0);
-                    latestPriceRef.current = 0;
-                    setLastTrade(null);
-                    setClockOffset(null);
-                  }
-                }}
-                disabled={gameState.status === GameStatus.RUNNING}
-                className={`text-[9px] font-black px-5 py-2 rounded-xl transition-all ${selectedAsset === asset ? "bg-indigo-600 shadow-lg text-white" : "text-gray-500 hover:text-gray-300"} ${gameState.status === GameStatus.RUNNING ? "opacity-50 cursor-not-allowed" : ""}`}
-              >
-                {asset}
-              </button>
-            ))}
-          </nav>
-
-          {/* MUSIC TOGGLE BUTTON */}
-          <button onClick={toggleMusic} className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all ${isMusicPlaying ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-400" : "bg-white/5 border-white/5 text-gray-500 hover:bg-white/10"}`}>
-            {isMusicPlaying ? (
-              <>
-                <div className="flex gap-0.5 items-end h-3">
-                  <span className="w-0.5 bg-indigo-400 h-2 animate-[bounce_0.8s_infinite]"></span>
-                  <span className="w-0.5 bg-indigo-400 h-3 animate-[bounce_1.2s_infinite]"></span>
-                  <span className="w-0.5 bg-indigo-400 h-1.5 animate-[bounce_0.6s_infinite]"></span>
-                </div>
-                <span className="text-[9px] font-black uppercase tracking-wider">Music ON</span>
-              </>
-            ) : (
-              <>
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
-                </svg>
-                <span className="text-[9px] font-black uppercase tracking-wider">Muted</span>
-              </>
-            )}
-          </button>
-        </div>
-
-        <div className="flex items-center gap-10">
-          <div className="flex flex-col items-end">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest">{getAssetName(selectedAsset)} / USD</span>
-              <button disabled={true} className={`text-[8px] px-1.5 py-0.5 rounded uppercase tracking-wider font-black transition-colors ${connectionError ? "bg-red-500/20 text-red-400 border border-red-500/30" : "bg-white/10 text-gray-400 opacity-60 cursor-default"}`}>
-                BYBIT {connectionError ? "(!)" : ""}
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {/* Real Price Display */}
-              <span className="text-xs font-black mono">{connectionError ? "CONNECTION ERR" : realPrice > 0 ? `$${realPrice.toFixed(2)}` : "CONNECTING..."}</span>
-              <div className="flex items-center gap-1">
-                <span className={`w-1.5 h-1.5 rounded-full ${connectionError ? "bg-red-500" : realPrice > 0 ? "bg-green-500 animate-pulse" : "bg-yellow-500"} `}></span>
-                <span className={`text-[9px] font-bold ${connectionError ? "text-red-500" : realPrice > 0 ? "text-green-500" : "text-yellow-500"}`}>{connectionError ? "BLOCKED" : realPrice > 0 ? "REAL-TIME" : "WAIT"}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="h-8 w-px bg-white/10"></div>
-
-          <div className="flex flex-col items-end">
-            <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest mb-1">Session P/L</span>
-            <span className={`text-xs font-black mono ${gameState.sessionPL >= 0 ? "text-green-500" : "text-red-500"}`}>
-              {gameState.sessionPL >= 0 ? "+" : ""}${gameState.sessionPL.toFixed(2)}
-            </span>
-          </div>
-          <div className="flex items-center gap-4 bg-white/5 px-5 py-2.5 rounded-2xl border border-white/5 shadow-inner">
-            <div className="flex flex-col items-end">
-              <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest mb-0.5">Wallet</span>
-              <span className="text-sm font-black mono text-indigo-100">${gameState.balance.toLocaleString()}</span>
-            </div>
-            <button className="w-7 h-7 bg-indigo-600 hover:bg-indigo-500 rounded-lg flex items-center justify-center font-black transition-all shadow-lg active:scale-95">+</button>
-          </div>
-        </div>
-      </header>
+      <Header
+        selectedAsset={selectedAsset}
+        onAssetChange={setSelectedAsset}
+        isGameRunning={gameState.status === GameStatus.RUNNING}
+        isMusicPlaying={isMusicPlaying}
+        onToggleMusic={toggleMusic}
+        onOpenTutorial={() => setIsTutorialOpen(true)}
+        realPrice={realPrice}
+        connectionError={connectionError}
+        sessionPL={gameState.sessionPL}
+        streak={streak}
+        ldcBalance={ldcBalance}
+        playBalance={playBalance}
+        isPlayMode={isPlayMode}
+        onOpenRecharge={() => setIsRechargeModalOpen(true)}
+      />
 
       {/* Main Game Interface */}
       <main className="flex-1 relative">
@@ -777,73 +516,47 @@ const App: React.FC = () => {
       </main>
 
       {/* Control Footer */}
-      <footer className="h-28 bg-[#0d0d12] border-t border-white/5 flex items-center px-14 justify-between z-50 shadow-2xl">
-        <div className="flex gap-16">
-          <div className="flex flex-col gap-2.5">
-            <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60">Stake Amount</span>
-            <div className="flex items-center gap-4">
-              <button onClick={() => setStakeAmount(Math.max(1, stakeAmount - 1))} className="w-10 h-10 bg-white/5 rounded-xl border border-white/10 hover:text-white transition-all flex items-center justify-center text-gray-400 font-black text-lg">
-                −
-              </button>
-              <div className="bg-white/5 border border-white/10 px-8 py-2.5 rounded-xl mono font-black text-base min-w-[140px] text-center shadow-inner text-indigo-100">${stakeAmount.toFixed(2)}</div>
-              <button onClick={() => setStakeAmount(stakeAmount + 1)} className="w-10 h-10 bg-white/5 rounded-xl border border-white/10 hover:text-white transition-all flex items-center justify-center text-gray-400 font-black text-lg">
-                +
-              </button>
-            </div>
-          </div>
-          <div className="flex flex-col gap-2.5">
-            <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60">Trading Mode</span>
-            <div className="flex items-center gap-4 bg-indigo-500/10 border border-indigo-500/20 px-5 py-2.5 rounded-2xl text-indigo-400">
-              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-              <span className="text-[10px] font-black uppercase italic tracking-wider">{selectedAsset} / Real-Time ⚡</span>
-            </div>
-          </div>
-        </div>
+      <Footer
+        stakeAmount={stakeAmount}
+        onStakeChange={setStakeAmount}
+        currentBalance={currentBalance}
+        isPlayMode={isPlayMode}
+        isLoggedIn={isLoggedIn}
+        onToggleMode={toggleGameMode}
+        onResetPlayBalance={resetPlayBalance}
+        selectedAsset={selectedAsset}
+        gameStatus={gameState.status}
+        activeBetsCount={gameState.activeBets.length}
+        isConnected={latestPriceRef.current > 0}
+        connectionError={connectionError}
+        onStartRound={startRound}
+        onStopRound={handleCrash}
+      />
 
-        <div className="flex items-center gap-20">
-          <div className="flex flex-col items-end gap-1.5">
-            <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60">Active Risk</span>
-            <span className="text-3xl font-black text-yellow-400 mono tracking-tighter shadow-yellow-400/10 drop-shadow-lg">${(gameState.activeBets.length * stakeAmount).toFixed(2)}</span>
-          </div>
-          <button
-            onClick={gameState.status === GameStatus.RUNNING ? handleCrash : startRound}
-            disabled={latestPriceRef.current === 0 || gameState.status === GameStatus.CRASHED}
-            className={`px-16 h-14 rounded-2xl font-black text-xs uppercase italic tracking-[0.25em] transition-all shadow-2xl relative overflow-hidden group ${
-              latestPriceRef.current === 0
-                ? "bg-white/5 text-gray-600 cursor-not-allowed border border-white/5"
-                : gameState.status === GameStatus.RUNNING
-                ? "bg-red-600 hover:bg-red-500 text-white shadow-red-600/40 active:scale-95"
-                : gameState.status === GameStatus.CRASHED
-                ? "bg-red-900/50 text-red-300 border border-red-900 cursor-not-allowed"
-                : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/40 active:scale-95"
-            }`}
-          >
-            {latestPriceRef.current === 0 ? (
-              connectionError ? (
-                "Connection Failed"
-              ) : (
-                "Connecting..."
-              )
-            ) : gameState.status === GameStatus.RUNNING ? (
-              <>
-                <span className="relative z-10">Stop Cycle</span>
-                <div className="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-              </>
-            ) : gameState.status === GameStatus.CRASHED ? (
-              "MARKET FAILURE"
-            ) : gameState.status === GameStatus.WAITING ? (
-              <>
-                <span className="relative z-10">Start Cycle</span>
-                <div className="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
-              </>
-            ) : (
-              "Tracking Market"
-            )}
-          </button>
-        </div>
-      </footer>
+      {/* 充值弹窗 */}
+      <RechargeModal
+        isOpen={isRechargeModalOpen}
+        onClose={() => setIsRechargeModalOpen(false)}
+        onSuccess={(amount) => {
+          setLdcBalance((prev) => prev + amount);
+          setIsRechargeModalOpen(false);
+        }}
+      />
+
+      {/* 教程弹窗 */}
+      <TutorialModal isOpen={isTutorialOpen} onClose={() => setIsTutorialOpen(false)} houseEdge={HOUSE_EDGE} />
+
+      {/* 侧边统计面板 */}
+      <div className="fixed right-4 top-1/2 -translate-y-1/2 w-56 space-y-4 z-30 pointer-events-auto">
+        <GameStats totalBets={totalBets} totalWins={totalWins} totalLosses={totalLosses} sessionPL={gameState.sessionPL} houseEdge={HOUSE_EDGE} isPlayMode={isPlayMode} />
+        <BetHistoryPanel history={betHistory} maxItems={5} />
+      </div>
+
+      {/* 动画效果 */}
+      <WinCelebration isActive={showWinCelebration} amount={winAmount} multiplier={winMultiplier} onComplete={() => setShowWinCelebration(false)} />
+      <LoseAnimation isActive={showLoseAnimation} onComplete={() => setShowLoseAnimation(false)} />
+      <ModeSwitchOverlay isPlayMode={isPlayMode} />
+
       <style>{`
         @keyframes bounce-short {
           0%, 100% { transform: translateY(0); }
