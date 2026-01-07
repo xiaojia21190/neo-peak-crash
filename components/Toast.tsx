@@ -84,7 +84,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
 
       {/* Toast 容器 */}
-      <div className="fixed top-20 right-4 z-[100] flex flex-col gap-2">
+      <div className="fixed top-20 right-4 z-100 flex flex-col gap-2">
         {toasts.map((toast) => (
           <div key={toast.id} className={`flex items-center gap-3 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-sm text-white text-sm font-bold animate-slide-in ${getToastStyles(toast.type)}`}>
             {getIcon(toast.type)}

@@ -61,7 +61,7 @@ export function WinCelebration({ isActive, amount, multiplier, onComplete }: Win
   if (!isActive && particles.length === 0) return null;
 
   return (
-    <div className="fixed inset-0 pointer-events-none z-[200]">
+    <div className="fixed inset-0 pointer-events-none z-200">
       {/* 粒子效果 */}
       {particles.map((particle) => (
         <div
@@ -83,7 +83,7 @@ export function WinCelebration({ isActive, amount, multiplier, onComplete }: Win
       {/* 金额显示 */}
       {showAmount && (
         <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-win-popup">
-          <div className="bg-gradient-to-r from-green-600 to-emerald-500 px-8 py-4 rounded-2xl shadow-2xl shadow-green-500/50">
+          <div className="bg-linear-to-r from-green-600 to-emerald-500 px-8 py-4 rounded-2xl shadow-2xl shadow-green-500/50">
             <div className="text-center">
               <div className="text-white/80 text-sm font-bold mb-1">🎉 恭喜获胜！</div>
               <div className="text-white text-3xl font-black">+{amount.toFixed(2)} LDC</div>
@@ -155,7 +155,7 @@ export function BetPlacedAnimation({ isActive, x, y, amount, onComplete }: BetPl
   if (!isActive) return null;
 
   return (
-    <div className="fixed pointer-events-none z-[150] animate-bet-placed" style={{ left: x, top: y, transform: "translate(-50%, -50%)" }}>
+    <div className="fixed pointer-events-none z-150 animate-bet-placed" style={{ left: x, top: y, transform: "translate(-50%, -50%)" }}>
       <div className="relative">
         {/* 波纹效果 */}
         <div className="absolute inset-0 w-20 h-20 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-indigo-500 animate-ripple" />
@@ -235,7 +235,7 @@ export function ModeSwitchOverlay({ isPlayMode }: ModeSwitchAnimationProps) {
   if (!isAnimating) return null;
 
   return (
-    <div className="fixed inset-0 pointer-events-none z-[100]">
+    <div className="fixed inset-0 pointer-events-none z-100">
       <div className={`absolute inset-0 animate-mode-flash ${isPlayMode ? "bg-purple-500/20" : "bg-yellow-500/20"}`} />
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-mode-text">
         <div className={`px-8 py-4 rounded-2xl ${isPlayMode ? "bg-purple-600" : "bg-yellow-600"} shadow-2xl`}>
@@ -312,7 +312,7 @@ export function LoseAnimation({ isActive, onComplete }: LoseAnimationProps) {
   if (!isActive) return null;
 
   return (
-    <div className="fixed inset-0 pointer-events-none z-[150]">
+    <div className="fixed inset-0 pointer-events-none z-150">
       <div className="absolute inset-0 bg-red-500/10 animate-lose-flash" />
 
       <style jsx>{`

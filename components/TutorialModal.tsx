@@ -30,7 +30,7 @@ const TUTORIAL_STEPS = [
     content: (
       <div className="space-y-4">
         <div className="flex items-start gap-3">
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shrink-0">
             <span className="font-bold">1</span>
           </div>
           <div>
@@ -39,7 +39,7 @@ const TUTORIAL_STEPS = [
           </div>
         </div>
         <div className="flex items-start gap-3">
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shrink-0">
             <span className="font-bold">2</span>
           </div>
           <div>
@@ -48,7 +48,7 @@ const TUTORIAL_STEPS = [
           </div>
         </div>
         <div className="flex items-start gap-3">
-          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center flex-shrink-0">
+          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shrink-0">
             <span className="font-bold">3</span>
           </div>
           <div>
@@ -189,13 +189,13 @@ export function TutorialModal({ isOpen, onClose, houseEdge }: TutorialModalProps
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100]" onClick={handleClose} />
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-100" onClick={handleClose} />
 
       {/* Modal */}
-      <div className="fixed inset-0 flex items-center justify-center z-[101] p-4">
+      <div className="fixed inset-0 flex items-center justify-center z-101 p-4">
         <div className="bg-[#1a1a24] border border-white/10 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
           {/* Header */}
-          <div className="bg-gradient-to-r from-indigo-600/20 to-purple-600/20 px-6 py-4 border-b border-white/5">
+          <div className="bg-linear-to-r from-indigo-600/20 to-purple-600/20 px-6 py-4 border-b border-white/5">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-black text-white">{step.title}</h2>
               <button onClick={handleClose} className="text-gray-400 hover:text-white transition-colors">
@@ -213,7 +213,7 @@ export function TutorialModal({ isOpen, onClose, houseEdge }: TutorialModalProps
           </div>
 
           {/* Content */}
-          <div className="px-6 py-6 min-h-[280px]">{content}</div>
+          <div className="px-6 py-6 min-h-70">{content}</div>
 
           {/* Footer */}
           <div className="px-6 py-4 border-t border-white/5 flex items-center justify-between">

@@ -44,7 +44,7 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
             <button onClick={() => onStakeChange(Math.max(1, stakeAmount - 1))} className="w-8 h-8 bg-white/5 rounded-lg border border-white/10 hover:text-white transition-all flex items-center justify-center text-gray-400 font-black text-sm">
               −
             </button>
-            <div className="bg-white/5 border border-white/10 px-4 py-2 rounded-xl mono font-black text-sm min-w-[100px] text-center shadow-inner text-indigo-100">{stakeAmount.toFixed(2)} LDC</div>
+            <div className="bg-white/5 border border-white/10 px-4 py-2 rounded-xl mono font-black text-sm min-w-25 text-center shadow-inner text-indigo-100">{stakeAmount.toFixed(2)} LDC</div>
             <button onClick={() => onStakeChange(stakeAmount + 1)} className="w-8 h-8 bg-white/5 rounded-lg border border-white/10 hover:text-white transition-all flex items-center justify-center text-gray-400 font-black text-sm">
               +
             </button>

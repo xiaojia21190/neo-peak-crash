@@ -35,7 +35,7 @@ export function BetHistoryPanel({ history, maxItems = 10 }: BetHistoryPanelProps
     <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
       <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-wider mb-3">下注历史</h3>
 
-      <div className="space-y-2 max-h-[200px] overflow-y-auto custom-scrollbar">
+      <div className="space-y-2 max-h-50 overflow-y-auto custom-scrollbar">
         {displayHistory.map((item) => (
           <div key={item.id} className={`flex items-center justify-between p-2 rounded-xl ${item.result === "win" ? "bg-green-500/10 border border-green-500/20" : item.result === "loss" ? "bg-red-500/10 border border-red-500/20" : "bg-yellow-500/10 border border-yellow-500/20"}`}>
             <div className="flex items-center gap-3">

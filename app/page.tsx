@@ -462,7 +462,7 @@ const App: React.FC = () => {
   const currentBasePrice = gameState.status === GameStatus.RUNNING ? startPrice : latestPriceRef.current || 0;
 
   return (
-    <div className="min-w-[1280px] min-h-[720px] h-screen w-full flex flex-col bg-[#0d0d12] text-white font-sans overflow-hidden">
+    <div className="min-w-7xl min-h-180 h-screen w-full flex flex-col bg-[#0d0d12] text-white font-sans overflow-hidden">
       {/* Header */}
       <Header
         selectedAsset={selectedAsset}
