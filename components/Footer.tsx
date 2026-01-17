@@ -35,17 +35,23 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
   const isWaiting = gameStatus === GameStatus.WAITING;
 
   return (
-    <footer className="h-28 bg-[#0d0d12] border-t border-white/5 flex items-center px-14 justify-between z-50 shadow-2xl">
+    <footer className="h-28 bg-[#0F172A] border-t border-slate-700/30 flex items-center px-14 justify-between z-50 shadow-2xl backdrop-blur-sm">
       <div className="flex gap-16">
         {/* Stake Amount */}
         <div className="flex flex-col gap-2.5">
-          <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60">Stake Amount</span>
+          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Stake Amount</span>
           <div className="flex items-center gap-2">
-            <button onClick={() => onStakeChange(Math.max(1, stakeAmount - 1))} className="w-8 h-8 bg-white/5 rounded-lg border border-white/10 hover:text-white transition-all flex items-center justify-center text-gray-400 font-black text-sm">
+            <button
+              onClick={() => onStakeChange(Math.max(1, stakeAmount - 1))}
+              className="w-8 h-8 bg-slate-800/50 rounded-lg border border-slate-700/50 hover:bg-slate-700/50 hover:border-slate-600 transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-slate-200 font-black text-sm"
+            >
               −
             </button>
-            <div className="bg-white/5 border border-white/10 px-4 py-2 rounded-xl mono font-black text-sm min-w-25 text-center shadow-inner text-indigo-100">{stakeAmount.toFixed(2)} LDC</div>
-            <button onClick={() => onStakeChange(stakeAmount + 1)} className="w-8 h-8 bg-white/5 rounded-lg border border-white/10 hover:text-white transition-all flex items-center justify-center text-gray-400 font-black text-sm">
+            <div className="bg-slate-800/50 border border-slate-700/50 px-4 py-2 rounded-xl font-mono font-black text-sm min-w-25 text-center shadow-inner text-amber-400">{stakeAmount.toFixed(2)} LDC</div>
+            <button
+              onClick={() => onStakeChange(stakeAmount + 1)}
+              className="w-8 h-8 bg-slate-800/50 rounded-lg border border-slate-700/50 hover:bg-slate-700/50 hover:border-slate-600 transition-all duration-200 flex items-center justify-center text-slate-400 hover:text-slate-200 font-black text-sm"
+            >
               +
             </button>
           </div>
@@ -99,7 +105,7 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
                   <path d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
               )}
-              <span className="text-[10px] font-black uppercase italic tracking-wider">{isPlayMode ? "游玩模式 🎮" : `${selectedAsset} / 真实模式 ⚡`}</span>
+              <span className="text-[10px] font-heading font-black uppercase italic tracking-wider">{isPlayMode ? "游玩模式" : `${selectedAsset} / 真实模式`}</span>
             </button>
           </div>
         </div>
@@ -120,10 +126,10 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
             !isConnected
               ? "bg-white/5 text-gray-600 cursor-not-allowed border border-white/5"
               : isRunning
-              ? "bg-red-600 hover:bg-red-500 text-white shadow-red-600/40 active:scale-95"
-              : isCrashed
-              ? "bg-red-900/50 text-red-300 border border-red-900 cursor-not-allowed"
-              : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/40 active:scale-95"
+                ? "bg-red-600 hover:bg-red-500 text-white shadow-red-600/40 active:scale-95"
+                : isCrashed
+                  ? "bg-red-900/50 text-red-300 border border-red-900 cursor-not-allowed"
+                  : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/40 active:scale-95"
           }`}
         >
           {!isConnected ? (

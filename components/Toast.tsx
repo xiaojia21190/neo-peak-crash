@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from "react";
 
 interface Toast {
   id: string;
@@ -24,6 +24,12 @@ export function useToast() {
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setPrefersReducedMotion(mediaQuery.matches);
+  }, []);
 
   const showToast = useCallback((message: string, type: Toast["type"] = "info") => {
     const id = Math.random().toString(36).substring(2, 9);
@@ -38,14 +44,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const getToastStyles = (type: Toast["type"]) => {
     switch (type) {
       case "success":
-        return "bg-green-500/90 border-green-400";
+        return "bg-green-500/90 border-green-400 shadow-green-500/30";
       case "error":
-        return "bg-red-500/90 border-red-400";
+        return "bg-red-500/90 border-red-400 shadow-red-500/30";
       case "warning":
-        return "bg-yellow-500/90 border-yellow-400 text-black";
+        return "bg-primary/90 border-primary shadow-primary/30";
       case "info":
       default:
-        return "bg-indigo-500/90 border-indigo-400";
+        return "bg-cta/90 border-cta shadow-cta/30";
     }
   };
 
@@ -86,7 +92,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {/* Toast 容器 */}
       <div className="fixed top-20 right-4 z-100 flex flex-col gap-2">
         {toasts.map((toast) => (
-          <div key={toast.id} className={`flex items-center gap-3 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-sm text-white text-sm font-bold animate-slide-in ${getToastStyles(toast.type)}`}>
+          <div key={toast.id} className={`flex items-center gap-3 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-sm text-white text-sm font-heading font-bold ${prefersReducedMotion ? "" : "animate-slide-in"} ${getToastStyles(toast.type)}`}>
             {getIcon(toast.type)}
             <span>{toast.message}</span>
           </div>

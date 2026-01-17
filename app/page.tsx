@@ -453,7 +453,7 @@ const App: React.FC = () => {
         activeBets: [...prev.activeBets, newBet],
       }));
     },
-    [currentBalance, setCurrentBalance, stakeAmount, playSound, isLoggedIn, isPlayMode, showToast]
+    [currentBalance, setCurrentBalance, stakeAmount, playSound, isLoggedIn, isPlayMode, showToast],
   );
 
   const streak = gameState.streaks[selectedAsset] || { type: "NONE", count: 0 };
@@ -496,8 +496,11 @@ const App: React.FC = () => {
           <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md border border-white/10 px-6 py-2 rounded-full flex items-center gap-6 shadow-2xl z-40 pointer-events-none">
             <div className="flex items-center gap-2">
               <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-              <span className="text-[9px] font-black text-white/50 uppercase tracking-wider">
-                Stream <span className="text-yellow-400">⚡</span>
+              <span className="text-[9px] font-heading font-black text-white/50 uppercase tracking-wider flex items-center gap-1">
+                Stream
+                <svg className="w-3 h-3 text-primary" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
               </span>
             </div>
             <div className="flex gap-4 font-mono text-[10px]">

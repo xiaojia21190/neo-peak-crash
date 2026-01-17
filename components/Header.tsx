@@ -54,24 +54,24 @@ const getAssetName = (symbol: string) => {
 
 export const Header = memo(function Header({ selectedAsset, onAssetChange, isGameRunning, isMusicPlaying, onToggleMusic, onOpenTutorial, realPrice, connectionError, sessionPL, streak, ldcBalance, playBalance, isPlayMode, onOpenRecharge }: HeaderProps) {
   return (
-    <header className="flex justify-between items-center px-8 py-4 bg-[#0d0d12] border-b border-white/5 z-50 shadow-2xl">
+    <header className="flex justify-between items-center px-8 py-4 bg-background-dark border-b border-border-dark z-50 shadow-glass">
       <div className="flex items-center gap-10">
         {/* Logo */}
         <div className="flex items-center gap-2 group cursor-pointer">
-          <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-600/30 group-hover:scale-105 transition-all">
+          <div className="w-9 h-9 bg-cta rounded-xl flex items-center justify-center shadow-neon-purple group-hover:bg-cta-light transition-colors duration-200">
             <span className="font-black text-xs italic">P</span>
           </div>
-          <span className="font-black text-xs tracking-[0.2em] uppercase italic opacity-80">PingooTread</span>
+          <span className="font-heading font-black text-xs tracking-[0.2em] uppercase italic opacity-80">PingooTread</span>
         </div>
 
         {/* Asset Selector */}
-        <nav className="flex gap-2 p-1.5 bg-white/5 rounded-2xl border border-white/5">
+        <nav className="flex gap-2 p-1.5 glass rounded-2xl">
           {ASSETS.map((asset) => (
             <button
               key={asset}
               onClick={() => !isGameRunning && onAssetChange(asset)}
               disabled={isGameRunning}
-              className={`text-[9px] font-black px-5 py-2 rounded-xl transition-all ${selectedAsset === asset ? "bg-indigo-600 shadow-lg text-white" : "text-gray-500 hover:text-gray-300"} ${isGameRunning ? "opacity-50 cursor-not-allowed" : ""}`}
+              className={`text-[9px] font-heading font-black px-5 py-2 rounded-xl transition-colors duration-200 cursor-pointer ${selectedAsset === asset ? "bg-cta text-white shadow-neon-purple" : "text-text-muted hover:text-text hover:bg-white/5"} ${isGameRunning ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               {asset}
             </button>
@@ -79,15 +79,15 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
         </nav>
 
         {/* Music Toggle */}
-        <button onClick={onToggleMusic} className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all ${isMusicPlaying ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-400" : "bg-white/5 border-white/5 text-gray-500 hover:bg-white/10"}`}>
+        <button onClick={onToggleMusic} className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-colors duration-200 cursor-pointer ${isMusicPlaying ? "bg-cta/10 border-cta/30 text-cta" : "glass text-text-muted hover:text-text hover:bg-white/10"}`}>
           {isMusicPlaying ? (
             <>
               <div className="flex gap-0.5 items-end h-3">
-                <span className="w-0.5 bg-indigo-400 h-2 animate-[bounce_0.8s_infinite]"></span>
-                <span className="w-0.5 bg-indigo-400 h-3 animate-[bounce_1.2s_infinite]"></span>
-                <span className="w-0.5 bg-indigo-400 h-1.5 animate-[bounce_0.6s_infinite]"></span>
+                <span className="w-0.5 bg-cta h-2 animate-[bounce_0.8s_infinite]"></span>
+                <span className="w-0.5 bg-cta h-3 animate-[bounce_1.2s_infinite]"></span>
+                <span className="w-0.5 bg-cta h-1.5 animate-[bounce_0.6s_infinite]"></span>
               </div>
-              <span className="text-[9px] font-black uppercase tracking-wider">Music ON</span>
+              <span className="text-[9px] font-heading font-black uppercase tracking-wider">Music ON</span>
             </>
           ) : (
             <>
@@ -95,17 +95,17 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
               </svg>
-              <span className="text-[9px] font-black uppercase tracking-wider">Muted</span>
+              <span className="text-[9px] font-heading font-black uppercase tracking-wider">Muted</span>
             </>
           )}
         </button>
 
         {/* Help Button */}
-        <button onClick={onOpenTutorial} className="flex items-center gap-2 px-4 py-2 rounded-xl border bg-white/5 border-white/5 text-gray-500 hover:bg-white/10 hover:text-white transition-all">
+        <button onClick={onOpenTutorial} className="flex items-center gap-2 px-4 py-2 rounded-xl border glass text-text-muted hover:text-text hover:bg-white/10 transition-colors duration-200 cursor-pointer">
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span className="text-[9px] font-black uppercase tracking-wider">帮助</span>
+          <span className="text-[9px] font-heading font-black uppercase tracking-wider">帮助</span>
         </button>
       </div>
 
@@ -113,28 +113,28 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
         {/* Price Display */}
         <div className="flex flex-col items-end">
           <div className="flex items-center gap-2 mb-1">
-            <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest">{getAssetName(selectedAsset)} / USD</span>
-            <button disabled={true} className={`text-[8px] px-1.5 py-0.5 rounded uppercase tracking-wider font-black transition-colors ${connectionError ? "bg-red-500/20 text-red-400 border border-red-500/30" : "bg-white/10 text-gray-400 opacity-60 cursor-default"}`}>
+            <span className="text-[8px] text-text-dark font-bold uppercase tracking-widest">{getAssetName(selectedAsset)} / USD</span>
+            <button disabled={true} className={`text-[8px] px-1.5 py-0.5 rounded uppercase tracking-wider font-heading font-black transition-colors ${connectionError ? "bg-red-500/20 text-red-400 border border-red-500/30" : "glass text-text-muted opacity-60 cursor-default"}`}>
               BYBIT {connectionError ? "(!)" : ""}
             </button>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs font-black mono">{connectionError ? "CONNECTION ERR" : realPrice > 0 ? `$${realPrice.toFixed(2)}` : "CONNECTING..."}</span>
+            <span className="text-xs font-heading font-black mono">{connectionError ? "CONNECTION ERR" : realPrice > 0 ? `$${realPrice.toFixed(2)}` : "CONNECTING..."}</span>
             <div className="flex items-center gap-1">
-              <span className={`w-1.5 h-1.5 rounded-full ${connectionError ? "bg-red-500" : realPrice > 0 ? "bg-green-500 animate-pulse" : "bg-yellow-500"} `}></span>
-              <span className={`text-[9px] font-bold ${connectionError ? "text-red-500" : realPrice > 0 ? "text-green-500" : "text-yellow-500"}`}>{connectionError ? "BLOCKED" : realPrice > 0 ? "REAL-TIME" : "WAIT"}</span>
+              <span className={`w-1.5 h-1.5 rounded-full ${connectionError ? "bg-red-500" : realPrice > 0 ? "bg-neon-green animate-pulse-slow" : "bg-yellow-500"} `}></span>
+              <span className={`text-[9px] font-heading font-bold ${connectionError ? "text-red-500" : realPrice > 0 ? "text-neon-green" : "text-yellow-500"}`}>{connectionError ? "BLOCKED" : realPrice > 0 ? "REAL-TIME" : "WAIT"}</span>
             </div>
           </div>
         </div>
 
-        <div className="h-8 w-px bg-white/10"></div>
+        <div className="h-8 w-px bg-border-dark"></div>
 
         {/* Session P/L */}
         <div className="flex flex-col items-end">
-          <span className="text-[8px] text-gray-500 font-bold uppercase tracking-widest mb-1">Session P/L</span>
+          <span className="text-[8px] text-text-dark font-bold uppercase tracking-widest mb-1">Session P/L</span>
           <div className="flex items-center gap-2">
-            <span className={`text-xs font-black mono ${sessionPL >= 0 ? "text-green-500" : "text-red-500"}`}>
+            <span className={`text-xs font-heading font-black mono ${sessionPL >= 0 ? "text-neon-green" : "text-red-500"}`}>
               {sessionPL >= 0 ? "+" : ""}
               {sessionPL.toFixed(2)} LDC
             </span>

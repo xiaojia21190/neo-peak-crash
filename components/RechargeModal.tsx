@@ -85,15 +85,15 @@ export function RechargeModal({ isOpen, onClose, onSuccess }: RechargeModalProps
   return (
     <>
       {/* 背景遮罩 */}
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50" onClick={onClose} />
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50" onClick={onClose} />
 
       {/* 弹窗内容 */}
-      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-[#1a1a24] border border-white/10 rounded-2xl shadow-2xl z-50 overflow-hidden">
+      <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-slate-900/95 backdrop-blur-xl border border-slate-700/50 rounded-2xl shadow-2xl z-50 overflow-hidden">
         {/* 标题 */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
-          <h2 className="text-lg font-black text-white">充值 LDC 积分</h2>
-          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors">
-            <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
+          <h2 className="text-lg font-heading font-black text-white">充值 LDC 积分</h2>
+          <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-800/50 transition-colors duration-200 cursor-pointer">
+            <svg className="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
@@ -103,13 +103,17 @@ export function RechargeModal({ isOpen, onClose, onSuccess }: RechargeModalProps
         <div className="p-6 space-y-6">
           {/* 预设金额 */}
           <div>
-            <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3">选择充值金额</label>
+            <label className="block text-[10px] font-heading font-bold text-slate-500 uppercase tracking-wider mb-3">选择充值金额</label>
             <div className="grid grid-cols-5 gap-2">
               {PRESET_AMOUNTS.map((value) => (
                 <button
                   key={value}
                   onClick={() => handlePresetClick(value)}
-                  className={`py-3 rounded-xl font-bold text-sm transition-all ${amount === value && !customAmount ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30" : "bg-white/5 text-gray-400 hover:bg-white/10 border border-white/5"}`}
+                  className={`py-3 rounded-xl font-heading font-bold text-sm transition-all duration-200 cursor-pointer ${
+                    amount === value && !customAmount
+                      ? "bg-cta text-white shadow-lg shadow-cta/30"
+                      : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-200 border border-slate-700/50"
+                  }`}
                 >
                   {value}
                 </button>
@@ -119,7 +123,7 @@ export function RechargeModal({ isOpen, onClose, onSuccess }: RechargeModalProps
 
           {/* 自定义金额 */}
           <div>
-            <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">或输入自定义金额</label>
+            <label className="block text-[10px] font-heading font-bold text-slate-500 uppercase tracking-wider mb-2">或输入自定义金额</label>
             <div className="relative">
               <input
                 type="number"
@@ -128,34 +132,42 @@ export function RechargeModal({ isOpen, onClose, onSuccess }: RechargeModalProps
                 placeholder="输入金额 (1-10000)"
                 min="1"
                 max="10000"
-                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-colors"
+                className="w-full bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-3 text-white placeholder-slate-500 focus:outline-none focus:border-cta focus:ring-1 focus:ring-cta transition-colors duration-200"
               />
-              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-yellow-400 font-bold text-sm">LDC</span>
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-primary font-heading font-bold text-sm">LDC</span>
             </div>
           </div>
 
           {/* 当前选择 */}
-          <div className="bg-white/5 rounded-xl p-4 border border-white/5">
+          <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50 backdrop-blur-sm">
             <div className="flex items-center justify-between">
-              <span className="text-gray-400 text-sm">充值金额</span>
-              <span className="text-2xl font-black text-yellow-400">
+              <span className="text-slate-400 text-sm">充值金额</span>
+              <span className="text-2xl font-heading font-black text-primary">
                 {amount.toFixed(2)} <span className="text-sm">LDC</span>
               </span>
             </div>
-            <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5">
-              <span className="text-gray-500 text-xs">支付方式</span>
-              <span className="text-indigo-400 text-xs font-bold">Linux DO Credit</span>
+            <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-700/50">
+              <span className="text-slate-500 text-xs">支付方式</span>
+              <span className="text-cta text-xs font-heading font-bold">Linux DO Credit</span>
             </div>
           </div>
 
           {/* 错误提示 */}
-          {error && <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-red-400 text-sm">{error}</div>}
+          {error && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-red-400 text-sm backdrop-blur-sm">
+              {error}
+            </div>
+          )}
 
           {/* 提交按钮 */}
           <button
             onClick={handleSubmit}
             disabled={isLoading || amount < 1}
-            className={`w-full py-4 rounded-xl font-black text-sm uppercase tracking-wider transition-all ${isLoading || amount < 1 ? "bg-gray-600 text-gray-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-600/30 active:scale-[0.98]"}`}
+            className={`w-full py-4 rounded-xl font-heading font-black text-sm uppercase tracking-wider transition-all duration-200 ${
+              isLoading || amount < 1
+                ? "bg-slate-700 text-slate-500 cursor-not-allowed"
+                : "bg-cta hover:bg-cta-light text-white shadow-lg shadow-cta/30 active:scale-[0.98] cursor-pointer"
+            }`}
           >
             {isLoading ? (
               <span className="flex items-center justify-center gap-2">
@@ -168,7 +180,7 @@ export function RechargeModal({ isOpen, onClose, onSuccess }: RechargeModalProps
           </button>
 
           {/* 提示 */}
-          <p className="text-center text-[10px] text-gray-500">充值将跳转到 Linux DO Credit 平台完成支付</p>
+          <p className="text-center text-[10px] text-slate-500">充值将跳转到 Linux DO Credit 平台完成支付</p>
         </div>
       </div>
     </>

@@ -1,26 +1,66 @@
 @import "tailwindcss";
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap");
 
 body {
-  font-family: "Inter", sans-serif;
-  background-color: #0d0d12;
-  color: #e2e8f0;
+  font-family: "DM Sans", sans-serif;
+  background-color: #0f172a;
+  color: #f8fafc;
   margin: 0;
   overflow: hidden;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Space Grotesk", sans-serif;
 }
 
 .mono {
   font-family: "JetBrains Mono", monospace;
 }
 
-.neon-glow {
-  text-shadow: 0 0 10px rgba(236, 72, 153, 0.7), 0 0 20px rgba(236, 72, 153, 0.3);
+/* Glassmorphism Effect */
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-dark {
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Neon Glow Effects */
+.neon-glow-purple {
+  text-shadow:
+    0 0 10px rgba(139, 92, 246, 0.7),
+    0 0 20px rgba(139, 92, 246, 0.3);
+}
+
+.neon-glow-cyan {
+  text-shadow:
+    0 0 10px rgba(0, 255, 255, 0.7),
+    0 0 20px rgba(0, 255, 255, 0.3);
+}
+
+.neon-glow-green {
+  text-shadow:
+    0 0 10px rgba(0, 255, 0, 0.7),
+    0 0 20px rgba(0, 255, 0, 0.3);
 }
 
 .bg-neon-gradient {
-  background: radial-gradient(circle at center, rgba(236, 72, 153, 0.1) 0%, rgba(13, 13, 18, 1) 100%);
+  background: radial-gradient(circle at center, rgba(139, 92, 246, 0.1) 0%, rgba(15, 23, 42, 1) 100%);
 }
 
-/* 自定义动画 */
+/* Custom Animations */
 @keyframes bounce-short {
   0%,
   100% {
@@ -33,6 +73,42 @@ body {
 
 .animate-bounce-short {
   animation: bounce-short 0.3s ease-in-out;
+}
+
+/* Accessibility: Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Focus States for Accessibility */
+*:focus-visible {
+  outline: 2px solid #8b5cf6;
+  outline-offset: 2px;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.5);
 }
 
 @keyframes hard-shake {
@@ -105,5 +181,7 @@ body {
 .glitch-text {
   animation: glitch 0.3s infinite linear alternate-reverse;
   fill: #ef4444;
-  text-shadow: 2px 0 #fff, -2px 0 #000;
+  text-shadow:
+    2px 0 #fff,
+    -2px 0 #000;
 }

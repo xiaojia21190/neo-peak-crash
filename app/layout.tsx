@@ -11,10 +11,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
-      <head>
-        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap" rel="stylesheet" />
-      </head>
-      <body className="antialiased">
+      <body className="antialiased font-body">
         <AuthProvider>
           <ToastProvider>{children}</ToastProvider>
         </AuthProvider>
