@@ -44,33 +44,94 @@ model User {
   @@map("users")
 }
 
+// 游戏回合模型
+model Round {
+  id     String      @id @default(cuid())
+  asset  String      // 交易对 (BTCUSDT, ETHUSDT)
+  status RoundStatus @default(PENDING)
+
+  // Provably Fair
+  serverSeed String? // 服务端种子（回合结束后公开）
+  commitHash String  // SHA256(serverSeed) - 回合开始时公开
+  clientSeed String? // 可选客户端种子
+
+  // 价格数据
+  startPrice Decimal  @db.Decimal(18, 8)
+  endPrice   Decimal? @db.Decimal(18, 8)
+
+  // 统计
+  totalBets   Int     @default(0)
+  totalVolume Decimal @default(0) @db.Decimal(18, 2)
+  totalPayout Decimal @default(0) @db.Decimal(18, 2)
+
+  // 时间
+  startedAt DateTime
+  endedAt   DateTime?
+
+  // 关联
+  bets      Bet[]
+  snapshots PriceSnapshot[]
+
+  @@index([asset, status])
+  @@index([startedAt])
+  @@map("rounds")
+}
+
+// 价格快照（时序数据）
+model PriceSnapshot {
+  id      String @id @default(cuid())
+  roundId String
+  round   Round  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+
+  timestamp DateTime // 精确到毫秒
+  price     Decimal  @db.Decimal(18, 8)
+  rowIndex  Decimal  @db.Decimal(10, 4) // 计算后的行索引
+
+  @@index([roundId, timestamp])
+  @@map("price_snapshots")
+}
+
 // 投注记录模型
 model Bet {
   id     String @id @default(cuid())
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  // 回合关联（新增）
+  roundId String?
+  round   Round?  @relation(fields: [roundId], references: [id], onDelete: SetNull)
+
   // 投注信息
   amount     Decimal @db.Decimal(18, 2) // 投注金额
   multiplier Decimal @db.Decimal(10, 4) // 目标倍率
-  rowIndex   Int // 行索引
-  colIndex   Int // 列索引
+  rowIndex   Int // 行索引（兼容旧字段）
+  colIndex   Int // 列索引（兼容旧字段）
+
+  // 新增：精确目标
+  targetRow  Decimal? @db.Decimal(10, 4) // 目标行（精确值）
+  targetTime Decimal? @db.Decimal(10, 3) // 目标时间（秒，相对回合开始）
 
   // 结果
-  isWin  Boolean @default(false)
-  payout Decimal @default(0) @db.Decimal(18, 2) // 实际赔付
+  status BetStatus @default(PENDING)
+  isWin  Boolean   @default(false)
+  payout Decimal   @default(0) @db.Decimal(18, 2) // 实际赔付
+
+  // 命中详情（新增）
+  hitPrice Decimal? @db.Decimal(18, 8) // 命中时的价格
+  hitRow   Decimal? @db.Decimal(10, 4) // 命中时的行
+  hitTime  Decimal? @db.Decimal(10, 3) // 命中时的时间
 
   // 游戏信息
   asset      String // 交易对 (如 BTCUSDT)
-  roundHash  String? // 回合哈希
+  roundHash  String? // 回合哈希（兼容旧字段）
   isPlayMode Boolean @default(false) // 是否为游戏模式
 
   // 时间戳
   createdAt DateTime  @default(now())
   settledAt DateTime? // 结算时间
 
-  @@index([userId])
-  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([roundId, status])
   @@map("bets")
 }
 
@@ -114,4 +175,23 @@ enum TransactionStatus {
   COMPLETED // 已完成
   FAILED // 失败
   CANCELLED // 已取消
+}
+
+// 回合状态
+enum RoundStatus {
+  PENDING   // 准备中
+  BETTING   // 投注阶段
+  RUNNING   // 运行中
+  SETTLING  // 结算中
+  COMPLETED // 已完成
+  CANCELLED // 已取消
+}
+
+// 投注状态
+enum BetStatus {
+  PENDING   // 待结算
+  WON       // 已赢
+  LOST      // 已输
+  CANCELLED // 已取消（回合取消时）
+  REFUNDED  // 已退款
 }

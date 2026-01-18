@@ -84,12 +84,22 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ playBalance: newBalance });
     }
 
-    // 更新余额
+    // 更新余额 - 仅允许游玩模式下的扣款操作
+    // 真实余额增加只能通过支付回调，不允许客户端直接操作
     if (action === "update") {
-      if (typeof amount !== "number") {
+      if (typeof amount !== "number" || !Number.isFinite(amount)) {
         return NextResponse.json(
           { error: "无效的金额" },
           { status: 400 }
+        );
+      }
+
+      // 安全限制：真实模式下只允许扣款（负数金额）
+      // 充值必须通过支付回调处理
+      if (!isPlayMode && amount > 0) {
+        return NextResponse.json(
+          { error: "不允许直接增加真实余额" },
+          { status: 403 }
         );
       }
 

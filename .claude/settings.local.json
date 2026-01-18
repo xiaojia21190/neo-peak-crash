@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pnpm install)",
+      "Bash(pnpm tsc:*)",
+      "Bash(echo:*)",
+      "Bash(\"C:/Program Files/Git/bin/git.exe\" -C \"D:/code/neon-peak-crash\" diff:*)",
+      "Bash(where:*)",
+      "Bash(cmd.exe /c \"cd /d D:\\\\code\\\\neon-peak-crash && git diff --name-only\")",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe -Command \"cd D:\\\\code\\\\neon-peak-crash; git status --porcelain\")",
+      "Bash(powershell.exe -Command \"Get-Content 'C:\\\\Users\\\\35033\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\D--code-neon-peak-crash\\\\tasks\\\\b3eb194.output' -Tail 50\":*)"
+    ]
+  }
+}

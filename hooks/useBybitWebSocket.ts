@@ -121,8 +121,16 @@ export function useBybitWebSocket(selectedAsset: string): UseBybitWebSocketRetur
           reconnectTimeout = setTimeout(connect, 3000);
         };
 
-        ws.onerror = () => {
-          console.warn("WebSocket Connection Error encountered.");
+        ws.onerror = (error) => {
+          console.warn("WebSocket Connection Error encountered:", error);
+          // 设置错误状态并触发重连
+          if (isMounted) {
+            setConnectionError("Connection Error - Reconnecting...");
+          }
+          // 关闭 socket 以触发 onclose 和重连逻辑
+          if (ws && ws.readyState !== WebSocket.CLOSED) {
+            ws.close();
+          }
         };
       } catch (e) {
         console.error("Failed to create WebSocket", e);

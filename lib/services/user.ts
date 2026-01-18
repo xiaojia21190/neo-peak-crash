@@ -160,7 +160,80 @@ export async function recordBet(data: {
 }
 
 /**
- * 结算投注
+ * 获取投注记录（含所有权验证）
+ */
+export async function getBetById(betId: string, userId: string) {
+  return prisma.bet.findFirst({
+    where: { id: betId, userId },
+    select: {
+      id: true,
+      userId: true,
+      amount: true,
+      multiplier: true,
+      isPlayMode: true,
+      settledAt: true,
+    },
+  });
+}
+
+/**
+ * 结算投注（带所有权验证）
+ * 返回投注记录用于后续处理
+ */
+export async function settleBetSecure(
+  betId: string,
+  userId: string,
+  isWin: boolean
+): Promise<{
+  success: boolean;
+  bet?: {
+    amount: number;
+    multiplier: number;
+    isPlayMode: boolean;
+    payout: number;
+  };
+  error?: string;
+}> {
+  // 查找投注并验证所有权
+  const bet = await prisma.bet.findFirst({
+    where: { id: betId, userId },
+  });
+
+  if (!bet) {
+    return { success: false, error: "投注记录不存在或无权访问" };
+  }
+
+  if (bet.settledAt) {
+    return { success: false, error: "投注已结算" };
+  }
+
+  // 服务端计算 payout，不信任客户端
+  const payout = isWin ? Number(bet.amount) * Number(bet.multiplier) : 0;
+
+  // 更新投注记录
+  await prisma.bet.update({
+    where: { id: betId },
+    data: {
+      isWin,
+      payout,
+      settledAt: new Date(),
+    },
+  });
+
+  return {
+    success: true,
+    bet: {
+      amount: Number(bet.amount),
+      multiplier: Number(bet.multiplier),
+      isPlayMode: bet.isPlayMode,
+      payout,
+    },
+  };
+}
+
+/**
+ * 结算投注（旧版本，保留兼容性）
+ * @deprecated 使用 settleBetSecure 代替
  */
 export async function settleBet(
   betId: string,

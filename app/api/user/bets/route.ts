@@ -6,9 +6,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import prisma from "@/lib/prisma";
 import {
   recordBet,
-  settleBet,
+  settleBetSecure,
   updateUserStats,
   updateUserBalance,
   getUserBalance,
@@ -69,36 +70,40 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 检查余额
-    const balance = await getUserBalance(userId);
-    if (!balance) {
-      return NextResponse.json(
-        { error: "用户不存在" },
-        { status: 404 }
-      );
-    }
+    // 使用事务原子性地扣除余额并创建投注
+    const betId = await prisma.$transaction(async (tx) => {
+      const balanceField = isPlayMode ? "playBalance" : "balance";
 
-    const currentBalance = isPlayMode ? balance.playBalance : balance.balance;
-    if (currentBalance < amount) {
-      return NextResponse.json(
-        { error: "余额不足" },
-        { status: 400 }
-      );
-    }
+      // 原子条件更新：仅在余额充足时扣款
+      const updateResult = await tx.user.updateMany({
+        where: {
+          id: userId,
+          [balanceField]: { gte: amount },
+        },
+        data: {
+          [balanceField]: { decrement: amount },
+        },
+      });
 
-    // 扣除投注金额
-    await updateUserBalance(userId, -amount, isPlayMode);
+      if (updateResult.count === 0) {
+        throw new Error("余额不足");
+      }
 
-    // 记录投注
-    const betId = await recordBet({
-      userId,
-      amount,
-      multiplier,
-      rowIndex,
-      colIndex,
-      asset: asset || "BTCUSDT",
-      roundHash,
-      isPlayMode: isPlayMode ?? false,
+      // 创建投注记录
+      const bet = await tx.bet.create({
+        data: {
+          userId,
+          amount,
+          multiplier,
+          rowIndex,
+          colIndex,
+          asset: asset || "BTCUSDT",
+          roundHash,
+          isPlayMode: isPlayMode ?? false,
+        },
+      });
+
+      return bet.id;
     });
 
     return NextResponse.json({
@@ -107,14 +112,29 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("创建投注失败:", error);
+
+    // 区分余额不足和其他错误
+    const errorMessage = error instanceof Error && error.message === "余额不足"
+      ? "余额不足"
+      : "创建投注失败";
+
     return NextResponse.json(
-      { error: "创建投注失败" },
-      { status: 500 }
+      { error: errorMessage },
+      { status: error instanceof Error && error.message === "余额不足" ? 400 : 500 }
     );
   }
 }
 
-// 结算投注
+// 结算投注 - 已禁用，投注结算由服务端游戏引擎自动处理
+// 此端点存在严重安全风险，客户端不应控制投注结果
+export async function PUT(request: NextRequest) {
+  return NextResponse.json(
+    { error: "此 API 已禁用。投注结算由服务端游戏引擎自动处理。" },
+    { status: 403 }
+  );
+}
+
+/* 原实现已禁用 - 存在安全漏洞
 export async function PUT(request: NextRequest) {
   try {
     const session = await auth();
@@ -128,7 +148,7 @@ export async function PUT(request: NextRequest) {
 
     const userId = session.user.id;
     const body = await request.json();
-    const { betId, isWin, payout, isPlayMode } = body;
+    const { betId, isWin } = body;
 
     // 验证参数
     if (!betId) {
@@ -138,16 +158,32 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // 结算投注
-    await settleBet(betId, isWin, payout || 0);
-
-    // 如果赢了，增加余额
-    if (isWin && payout > 0) {
-      await updateUserBalance(userId, payout, isPlayMode);
+    if (typeof isWin !== "boolean") {
+      return NextResponse.json(
+        { error: "缺少 isWin 参数" },
+        { status: 400 }
+      );
     }
 
-    // 更新用户统计（计算盈亏）
-    const profitAmount = isWin ? payout : 0;
+    // 使用安全的结算方法（验证所有权 + 服务端计算 payout）
+    const result = await settleBetSecure(betId, userId, isWin);
+
+    if (!result.success) {
+      return NextResponse.json(
+        { error: result.error },
+        { status: 400 }
+      );
+    }
+
+    const bet = result.bet!;
+
+    // 如果赢了，增加余额（使用服务端计算的 payout）
+    if (isWin && bet.payout > 0) {
+      await updateUserBalance(userId, bet.payout, bet.isPlayMode);
+    }
+
+    // 更新用户统计（净利润：赢时 payout - amount，输时 -amount）
+    const profitAmount = isWin ? bet.payout - bet.amount : -bet.amount;
     await updateUserStats(userId, isWin, profitAmount);
 
     // 获取最新余额
@@ -155,6 +191,7 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json({
       message: isWin ? "恭喜中奖！" : "未中奖",
+      payout: bet.payout,
       balance: balance?.balance ?? 0,
       playBalance: balance?.playBalance ?? 0,
     });
@@ -166,3 +203,4 @@ export async function PUT(request: NextRequest) {
     );
   }
 }
+*/

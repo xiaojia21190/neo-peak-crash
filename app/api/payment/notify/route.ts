@@ -4,16 +4,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifySign, type NotifyParams } from "@/lib/payment/ldc";
-
-// 简单的内存存储（生产环境应使用数据库）
-// 这里用于演示，实际应该持久化到数据库
-const paymentRecords = new Map<string, {
-  userId: string;
-  amount: number;
-  status: string;
-  paidAt?: Date;
-}>();
+import { verifySign } from "@/lib/payment/ldc";
+import prisma from "@/lib/prisma";
 
 export async function GET(request: NextRequest) {
   return handleNotify(request);
@@ -43,7 +35,7 @@ async function handleNotify(request: NextRequest) {
     console.log("收到支付回调:", JSON.stringify(params, null, 2));
 
     // 验证必要参数
-    const { trade_no, out_trade_no, trade_status, money, sign } = params;
+    const { trade_no, out_trade_no, trade_status, money, sign, pid } = params;
 
     if (!trade_no || !out_trade_no || !trade_status || !sign) {
       console.error("缺少必要参数");
@@ -52,9 +44,17 @@ async function handleNotify(request: NextRequest) {
 
     // 验证签名
     const secret = process.env.LDC_CLIENT_SECRET;
-    if (!secret) {
-      console.error("LDC_CLIENT_SECRET 未配置");
+    const configPid = process.env.LDC_CLIENT_ID;
+
+    if (!secret || !configPid) {
+      console.error("LDC 配置未设置");
       return new NextResponse("fail", { status: 500 });
+    }
+
+    // 验证 pid 匹配
+    if (pid && pid !== configPid) {
+      console.error("PID 不匹配");
+      return new NextResponse("fail", { status: 400 });
     }
 
     const isValid = verifySign(params, secret);
@@ -67,22 +67,70 @@ async function handleNotify(request: NextRequest) {
     if (trade_status === "TRADE_SUCCESS") {
       console.log(`支付成功: 订单号=${out_trade_no}, 金额=${money}`);
 
-      // 解析订单号获取用户ID
-      // 订单号格式: GAME_{userId}_{timestamp}_{random}
-      const parts = out_trade_no.split("_");
-      if (parts.length >= 2 && parts[0] === "GAME") {
-        const userId = parts[1];
-        const amount = parseFloat(money);
+      const amount = parseFloat(money);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        console.error("无效的金额:", money);
+        return new NextResponse("fail", { status: 400 });
+      }
 
-        // 记录支付（实际应该更新数据库中的用户余额）
-        paymentRecords.set(out_trade_no, {
-          userId,
-          amount,
-          status: "paid",
-          paidAt: new Date(),
+      // 使用事务确保幂等性和数据一致性
+      try {
+        await prisma.$transaction(async (tx) => {
+          // 加载预创建的订单
+          const existingTransaction = await tx.transaction.findUnique({
+            where: { orderNo: out_trade_no },
+          });
+
+          if (!existingTransaction) {
+            console.error(`订单 ${out_trade_no} 不存在，拒绝充值`);
+            throw new Error("订单不存在");
+          }
+
+          // 幂等性检查：如果已完成，跳过
+          if (existingTransaction.status === "COMPLETED") {
+            console.log(`订单 ${out_trade_no} 已处理，跳过`);
+            return;
+          }
+
+          // 验证订单金额是否匹配
+          if (Number(existingTransaction.amount) !== amount) {
+            console.error(`订单 ${out_trade_no} 金额不匹配: 预期=${existingTransaction.amount}, 实际=${amount}`);
+            throw new Error("订单金额不匹配");
+          }
+
+          // 验证用户存在
+          const user = await tx.user.findUnique({
+            where: { id: existingTransaction.userId },
+          });
+
+          if (!user) {
+            console.error(`用户 ${existingTransaction.userId} 不存在`);
+            throw new Error("用户不存在");
+          }
+
+          // 更新订单状态为已完成
+          await tx.transaction.update({
+            where: { orderNo: out_trade_no },
+            data: {
+              status: "COMPLETED",
+              tradeNo: trade_no,
+              completedAt: new Date(),
+            },
+          });
+
+          // 更新用户余额
+          await tx.user.update({
+            where: { id: existingTransaction.userId },
+            data: {
+              balance: { increment: amount },
+            },
+          });
+
+          console.log(`用户 ${existingTransaction.userId} 充值 ${amount} LDC 成功`);
         });
-
-        console.log(`用户 ${userId} 充值 ${amount} LDC 成功`);
+      } catch (dbError) {
+        console.error("数据库操作失败:", dbError);
+        return new NextResponse("fail", { status: 500 });
       }
     }
 
@@ -92,9 +140,4 @@ async function handleNotify(request: NextRequest) {
     console.error("处理支付回调失败:", error);
     return new NextResponse("fail", { status: 500 });
   }
-}
-
-// 导出支付记录查询（供其他模块使用）
-export function getPaymentRecord(tradeNo: string) {
-  return paymentRecords.get(tradeNo);
 }
