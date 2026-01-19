@@ -32,7 +32,13 @@ async function handleNotify(request: NextRequest) {
       });
     }
 
-    console.log("收到支付回调:", JSON.stringify(params, null, 2));
+    const logParams: Record<string, string> = {};
+    for (const [key, value] of Object.entries(params)) {
+      if (key === "sign" || key === "key" || key === "secret") continue;
+      logParams[key] = value;
+    }
+
+    console.log("收到支付回调:", JSON.stringify(logParams, null, 2));
 
     // 验证必要参数
     const { trade_no, out_trade_no, trade_status, money, sign, pid } = params;
@@ -86,21 +92,20 @@ async function handleNotify(request: NextRequest) {
             throw new Error("订单不存在");
           }
 
-          // 幂等性检查：如果已完成，跳过
-          if (existingTransaction.status === "COMPLETED") {
-            console.log(`订单 ${out_trade_no} 已处理，跳过`);
-            return;
-          }
-
           // 验证订单金额是否匹配
-          if (Number(existingTransaction.amount) !== amount) {
+          // 验证金额匹配 (使用整数比较避免浮点精度问题)
+          const expectedAmountCents = Math.round(Number(existingTransaction.amount) * 100);
+          const actualAmountCents = Math.round(amount * 100);
+
+          if (expectedAmountCents !== actualAmountCents) {
             console.error(`订单 ${out_trade_no} 金额不匹配: 预期=${existingTransaction.amount}, 实际=${amount}`);
             throw new Error("订单金额不匹配");
           }
 
-          // 验证用户存在
+          // 验证用户存在并获取当前余额
           const user = await tx.user.findUnique({
             where: { id: existingTransaction.userId },
+            select: { balance: true },
           });
 
           if (!user) {
@@ -108,15 +113,29 @@ async function handleNotify(request: NextRequest) {
             throw new Error("用户不存在");
           }
 
-          // 更新订单状态为已完成
-          await tx.transaction.update({
-            where: { orderNo: out_trade_no },
+          const balanceBefore = Number(user.balance);
+          const balanceAfter = balanceBefore + amount;
+
+          // 原子条件更新：只有 PENDING 状态才能更新为 COMPLETED
+          const updated = await tx.transaction.updateMany({
+            where: {
+              orderNo: out_trade_no,
+              status: "PENDING"
+            },
             data: {
               status: "COMPLETED",
               tradeNo: trade_no,
+              balanceBefore,
+              balanceAfter,
               completedAt: new Date(),
             },
           });
+
+          // 幂等门闩：只有成功更新 1 条记录才加钱
+          if (updated.count !== 1) {
+            console.log(`订单 ${out_trade_no} 已处理或不存在，跳过加钱`);
+            return;
+          }
 
           // 更新用户余额
           await tx.user.update({

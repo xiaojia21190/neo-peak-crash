@@ -39,7 +39,15 @@ export async function GET() {
   }
 }
 
-// 创建投注
+// 创建投注 - 已禁用，投注由 WebSocket GameEngine 处理
+export async function POST(request: NextRequest) {
+  return NextResponse.json(
+    { error: "此 API 已禁用。请通过 WebSocket 连接使用 GameEngine.placeBet() 下注。" },
+    { status: 403 }
+  );
+}
+
+/* 原实现已禁用 - 会导致扣款但引擎不结算
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
@@ -124,6 +132,7 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+*/
 
 // 结算投注 - 已禁用，投注结算由服务端游戏引擎自动处理
 // 此端点存在严重安全风险，客户端不应控制投注结果

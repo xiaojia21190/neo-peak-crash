@@ -111,6 +111,9 @@ model Bet {
   targetRow  Decimal? @db.Decimal(10, 4) // 目标行（精确值）
   targetTime Decimal? @db.Decimal(10, 3) // 目标时间（秒，相对回合开始）
 
+  // 幂等性保证
+  orderId String? @unique // 客户端订单ID，用于幂等性
+
   // 结果
   status BetStatus @default(PENDING)
   isWin  Boolean   @default(false)
@@ -132,6 +135,7 @@ model Bet {
 
   @@index([userId, createdAt])
   @@index([roundId, status])
+  @@index([orderId])
   @@map("bets")
 }
 
@@ -145,6 +149,11 @@ model Transaction {
   type   TransactionType
   amount Decimal           @db.Decimal(18, 2)
   status TransactionStatus @default(PENDING)
+
+  // 审计字段
+  balanceBefore Decimal @db.Decimal(18, 2) // 变动前余额
+  balanceAfter  Decimal @db.Decimal(18, 2) // 变动后余额
+  relatedBetId  String? // 关联投注ID
 
   // 支付信息
   orderNo String? @unique // 订单号
@@ -160,14 +169,19 @@ model Transaction {
 
   @@index([userId])
   @@index([orderNo])
+  @@index([userId, createdAt])
+  @@index([type])
   @@map("transactions")
 }
 
 enum TransactionType {
   RECHARGE // 充值
   WITHDRAW // 提现
-  BET_WIN // 投注赢
-  BET_LOSE // 投注输
+  BET      // 下注扣款
+  WIN      // 赢钱加款
+  REFUND   // 退款
+  BET_WIN  // 投注赢（已废弃）
+  BET_LOSE // 投注输（已废弃）
 }
 
 enum TransactionStatus {
@@ -190,6 +204,7 @@ enum RoundStatus {
 // 投注状态
 enum BetStatus {
   PENDING   // 待结算
+  SETTLING  // 结算中（内存状态，防止重复入队）
   WON       // 已赢
   LOST      // 已输
   CANCELLED // 已取消（回合取消时）

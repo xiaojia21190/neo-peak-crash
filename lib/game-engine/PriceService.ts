@@ -3,6 +3,8 @@
  */
 
 import { EventEmitter } from 'events';
+import WebSocket, { type RawData } from 'ws';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { Redis } from 'ioredis';
 import type { PriceUpdate } from './types';
 import { PRICE_STALE_THRESHOLD, PRICE_CRITICAL_THRESHOLD, REDIS_KEYS } from './constants';
@@ -10,6 +12,7 @@ import { PRICE_STALE_THRESHOLD, PRICE_CRITICAL_THRESHOLD, REDIS_KEYS } from './c
 export interface PriceServiceConfig {
   asset: string;
   maxReconnectAttempts?: number;
+  allowStartWithoutConnection?: boolean;
 }
 
 export class PriceService extends EventEmitter {
@@ -18,9 +21,12 @@ export class PriceService extends EventEmitter {
   private maxReconnectAttempts: number;
   private lastPrice: PriceUpdate | null = null;
   private lastPriceTime = 0;
+  private lastRedisWrite = 0;
   private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isStopped = false;
+  private reconnectScheduled = false;
 
   constructor(
     private config: PriceServiceConfig,
@@ -32,7 +38,23 @@ export class PriceService extends EventEmitter {
 
   async start(): Promise<void> {
     this.isStopped = false;
-    await this.connect();
+
+    try {
+      await this.connect();
+      console.log('[PriceService] Started successfully');
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      if (this.config.allowStartWithoutConnection) {
+        console.warn(`[PriceService] Initial connection failed: ${errorMsg}`);
+        console.warn('[PriceService] Starting in degraded mode, will retry in background');
+        // 重连会由 'close' 事件或 try-catch 块触发
+      } else {
+        console.error(`[PriceService] Failed to start: ${errorMsg}`);
+        throw error;
+      }
+    }
+
     this.startHealthCheck();
   }
 
@@ -43,54 +65,94 @@ export class PriceService extends EventEmitter {
 
     console.log(`[PriceService] Connecting to Bybit for ${this.config.asset}...`);
 
-    try {
-      this.ws = new WebSocket(url);
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
 
-      this.ws.onopen = () => {
-        console.log(`[PriceService] Connected to Bybit for ${this.config.asset}`);
-        this.reconnectAttempts = 0;
+      try {
+        const proxyUrl = process.env.PROXY_URL;
+        const options: any = {};
 
-        // 订阅交易流
-        this.ws!.send(JSON.stringify({
-          op: 'subscribe',
-          args: [`publicTrade.${this.config.asset}USDT`],
-        }));
-
-        // 心跳
-        this.pingInterval = setInterval(() => {
-          if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ op: 'ping' }));
-          }
-        }, 20000);
-
-        this.emit('connected');
-      };
-
-      this.ws.onmessage = (event) => {
-        this.handleMessage(event.data);
-      };
-
-      this.ws.onclose = (event) => {
-        console.warn(`[PriceService] Connection closed (code: ${event.code})`);
-        this.cleanup();
-        if (!this.isStopped) {
-          this.scheduleReconnect();
+        if (proxyUrl) {
+          console.log(`[PriceService] Using proxy: ${proxyUrl}`);
+          options.agent = new HttpsProxyAgent(proxyUrl);
         }
-      };
 
-      this.ws.onerror = (error) => {
-        console.error('[PriceService] WebSocket error:', error);
-        // onclose 会被触发，在那里处理重连
-      };
-    } catch (error) {
-      console.error('[PriceService] Failed to create WebSocket:', error);
-      this.scheduleReconnect();
-    }
+        this.ws = new WebSocket(url, options);
+
+        const connectTimeout = setTimeout(() => {
+          if (!settled && this.ws?.readyState !== WebSocket.OPEN) {
+            settled = true;
+            console.error('[PriceService] Connection timeout');
+            this.ws?.close();
+            reject(new Error('Connection timeout'));
+          }
+        }, 10000);
+
+        this.ws.on('open', () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(connectTimeout);
+            console.log(`[PriceService] Connected to Bybit for ${this.config.asset}`);
+            this.reconnectAttempts = 0;
+
+            // 订阅交易流
+            this.ws!.send(JSON.stringify({
+              op: 'subscribe',
+              args: [`publicTrade.${this.config.asset}USDT`],
+            }));
+
+            // 心跳
+            this.pingInterval = setInterval(() => {
+              if (this.ws?.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ op: 'ping' }));
+              }
+            }, 20000);
+
+            this.emit('connected');
+            resolve();
+          }
+        });
+
+        this.ws.on('message', (data) => {
+          this.handleMessage(data);
+        });
+
+        this.ws.on('close', (code, reason) => {
+          const closeReason = reason.toString();
+          console.warn(
+            `[PriceService] Connection closed (code: ${code}${closeReason ? `, reason: ${closeReason}` : ''})`
+          );
+
+          if (!settled) {
+            settled = true;
+            clearTimeout(connectTimeout);
+            reject(new Error(`Connection closed before open: ${code} ${closeReason}`));
+          }
+
+          this.cleanup();
+          if (!this.isStopped) {
+            this.scheduleReconnect();
+          }
+        });
+
+        this.ws.on('error', (error) => {
+          console.error('[PriceService] WebSocket error:', error);
+          // onclose 会被触发，在那里处理重连
+        });
+      } catch (error) {
+        if (!settled) {
+          settled = true;
+          console.error('[PriceService] Failed to create WebSocket:', error);
+          reject(error);
+        }
+      }
+    });
   }
 
-  private handleMessage(data: string): void {
+  private handleMessage(data: RawData | string): void {
     try {
-      const parsed = JSON.parse(data);
+      const message = this.normalizeMessageData(data);
+      const parsed = JSON.parse(message);
 
       // 忽略 pong 响应
       if (parsed.op === 'pong') return;
@@ -107,15 +169,24 @@ export class PriceService extends EventEmitter {
           timestamp,
           source: 'bybit',
         };
+
+        if (this.lastPriceTime === 0) {
+          this.emit('ready');
+        }
         this.lastPriceTime = Date.now();
 
         // 发送价格更新事件
         this.emit('price', this.lastPrice);
 
-        // 异步缓存到 Redis
-        this.cachePrice(this.lastPrice).catch(err =>
-          console.error('[PriceService] Redis cache failed:', err)
-        );
+        // 采样写入 Redis（默认 50ms 间隔）
+        const redisSampleMs = parseInt(process.env.REDIS_SAMPLE_MS ?? '50', 10);
+        const now = Date.now();
+        if (now - this.lastRedisWrite >= redisSampleMs) {
+          this.lastRedisWrite = now;
+          this.cachePrice(this.lastPrice).catch(err =>
+            console.error('[PriceService] Redis cache failed:', err)
+          );
+        }
       }
     } catch (err) {
       console.error('[PriceService] Parse error:', err);
@@ -128,8 +199,24 @@ export class PriceService extends EventEmitter {
     await this.redis.ltrim(key, 0, 999); // 保留最近 1000 条
   }
 
+  private normalizeMessageData(data: RawData | string): string {
+    if (typeof data === 'string') {
+      return data;
+    }
+
+    if (Array.isArray(data)) {
+      return Buffer.concat(data).toString('utf8');
+    }
+
+    if (data instanceof ArrayBuffer) {
+      return Buffer.from(data).toString('utf8');
+    }
+
+    return data.toString('utf8');
+  }
+
   private scheduleReconnect(): void {
-    if (this.isStopped) return;
+    if (this.isStopped || this.reconnectScheduled) return;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[PriceService] Max reconnect attempts reached!');
@@ -137,11 +224,17 @@ export class PriceService extends EventEmitter {
       return;
     }
 
+    this.reconnectScheduled = true;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
     this.reconnectAttempts++;
 
     console.log(`[PriceService] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-    setTimeout(() => this.connect(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectScheduled = false;
+      this.connect().catch(() => {
+        // 错误已记录，重连会由 'close' 事件或 try-catch 块处理
+      });
+    }, delay);
   }
 
   private startHealthCheck(): void {
@@ -209,9 +302,13 @@ export class PriceService extends EventEmitter {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.isStopped = true;
 
     if (this.healthCheckInterval) {
@@ -222,8 +319,16 @@ export class PriceService extends EventEmitter {
     this.cleanup();
 
     if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+      return new Promise<void>((resolve) => {
+        this.ws!.once('close', () => {
+          this.ws = null;
+          console.log('[PriceService] Stopped');
+          resolve();
+        });
+        this.ws!.close();
+
+        setTimeout(resolve, 2000);
+      });
     }
 
     console.log('[PriceService] Stopped');

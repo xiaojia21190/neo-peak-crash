@@ -31,7 +31,13 @@ export async function POST(request: NextRequest) {
     }
 
     // 获取回调地址
-    const baseUrl = process.env.NEXTAUTH_URL || request.nextUrl.origin;
+    const baseUrl = process.env.NEXTAUTH_URL;
+    if (!baseUrl) {
+      return NextResponse.json(
+        { success: false, error: 'NEXTAUTH_URL is not configured' },
+        { status: 500 }
+      );
+    }
     const notifyUrl = `${baseUrl}/api/payment/notify`;
     const returnUrl = `${baseUrl}/?recharge=success`;
 
@@ -50,9 +56,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 从支付表单中提取订单号
-    const orderNoMatch = result.paymentForm?.match(/name="out_trade_no"\s+value="([^"]+)"/);
-    const orderNo = orderNoMatch ? orderNoMatch[1] : null;
+    // 从支付表单参数中获取订单号
+    const orderNo = result.paymentForm?.params.out_trade_no;
 
     if (!orderNo) {
       return NextResponse.json(
@@ -69,6 +74,8 @@ export async function POST(request: NextRequest) {
         amount,
         status: "PENDING",
         orderNo,
+        balanceBefore: 0, // 充值订单创建时暂不知道余额，回调时更新
+        balanceAfter: 0,
       },
     });
 

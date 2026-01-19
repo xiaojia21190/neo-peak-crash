@@ -6,7 +6,7 @@
 export type RoundStatus = 'PENDING' | 'BETTING' | 'RUNNING' | 'SETTLING' | 'COMPLETED' | 'CANCELLED';
 
 // 投注状态（与 Prisma 枚举对应）
-export type BetStatus = 'PENDING' | 'WON' | 'LOST' | 'CANCELLED' | 'REFUNDED';
+export type BetStatus = 'PENDING' | 'SETTLING' | 'WON' | 'LOST' | 'CANCELLED' | 'REFUNDED';
 
 // ========== 配置类型 ==========
 

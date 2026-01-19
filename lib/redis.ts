@@ -48,6 +48,14 @@ export async function closeRedisClient(): Promise<void> {
     await redisClient.quit();
     redisClient = null;
   }
+  if (redisPubClient) {
+    await redisPubClient.quit();
+    redisPubClient = null;
+  }
+  if (redisSubClient) {
+    await redisSubClient.quit();
+    redisSubClient = null;
+  }
 }
 
 // 用于 Pub/Sub 的独立客户端

@@ -3,7 +3,8 @@
  */
 
 import crypto from 'crypto';
-import { CENTER_ROW_INDEX, PRICE_SENSITIVITY, MAX_ROW_INDEX } from './constants';
+import { CENTER_ROW_INDEX, PRICE_SENSITIVITY, MIN_ROW_INDEX, MAX_ROW_INDEX } from './constants';
+export { calculateMultiplier } from '../shared/gameMath';
 
 /**
  * 计算行索引（根据价格变化）
@@ -11,30 +12,7 @@ import { CENTER_ROW_INDEX, PRICE_SENSITIVITY, MAX_ROW_INDEX } from './constants'
 export function calculateRowIndex(currentPrice: number, startPrice: number): number {
   const percentChange = (currentPrice - startPrice) / startPrice;
   const rowDelta = percentChange * PRICE_SENSITIVITY;
-  return Math.max(-MAX_ROW_INDEX, Math.min(MAX_ROW_INDEX, CENTER_ROW_INDEX - rowDelta));
-}
-
-/**
- * 计算投注倍率
- * 倍率基于目标行与当前行的距离，以及时间差
- */
-export function calculateMultiplier(
-  targetRow: number,
-  currentRow: number,
-  timeDelta: number
-): number {
-  // 基础倍率：行距离越远，倍率越高
-  const rowDistance = Math.abs(targetRow - currentRow);
-  const baseMultiplier = 1 + rowDistance * 0.5;
-
-  // 时间因子：时间越短，倍率越高（最小倍率 1.0）
-  const timeFactor = Math.max(1, 2 - timeDelta * 0.1);
-
-  // 最终倍率，保留 4 位小数
-  const multiplier = Math.round(baseMultiplier * timeFactor * 10000) / 10000;
-
-  // 限制范围 1.01 - 100.00
-  return Math.max(1.01, Math.min(100, multiplier));
+  return Math.max(MIN_ROW_INDEX, Math.min(MAX_ROW_INDEX, CENTER_ROW_INDEX - rowDelta));
 }
 
 /**

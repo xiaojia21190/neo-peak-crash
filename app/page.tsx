@@ -35,6 +35,9 @@ const App: React.FC = () => {
   // 音频控制
   const { isMusicPlaying, toggleMusic, playSound } = useAudio();
 
+  // 下注金额
+  const [stakeAmount, setStakeAmount] = useState<number>(5.0);
+
   // 服务端游戏适配层 - 替代本地引擎
   const {
     gameEngineRef,
@@ -61,6 +64,8 @@ const App: React.FC = () => {
     activeBetsCount,
     sessionPL,
     history,
+    connect,
+    disconnect,
   } = useServerGameAdapter({
     userId: user?.id,
     isLoggedIn,
@@ -70,9 +75,6 @@ const App: React.FC = () => {
 
   // 资产选择（服务端目前固定 BTC）
   const [selectedAsset] = useState<string>("BTC");
-
-  // 下注金额
-  const [stakeAmount, setStakeAmount] = useState<number>(5.0);
 
   // 教程弹窗状态
   const [isTutorialOpen, setIsTutorialOpen] = useState(false);
@@ -128,9 +130,7 @@ const App: React.FC = () => {
         setWinAmount(payout);
         setWinMultiplier(bet.targetMultiplier);
         setShowWinCelebration(true);
-        setBetHistory((prev) =>
-          prev.map((h) => (h.id === bet.id ? { ...h, result: "win" as const, payout } : h))
-        );
+        setBetHistory((prev) => prev.map((h) => (h.id === bet.id ? { ...h, result: "win" as const, payout } : h)));
       }
 
       // 检测失败
@@ -138,9 +138,7 @@ const App: React.FC = () => {
         playSound("lose");
         setTotalLosses((prev) => prev + 1);
         setShowLoseAnimation(true);
-        setBetHistory((prev) =>
-          prev.map((h) => (h.id === bet.id ? { ...h, result: "loss" as const, payout: 0 } : h))
-        );
+        setBetHistory((prev) => prev.map((h) => (h.id === bet.id ? { ...h, result: "loss" as const, payout: 0 } : h)));
       }
     });
 
@@ -188,7 +186,7 @@ const App: React.FC = () => {
       // 调用服务端下注
       onPlaceBet(multiplier, timePoint, rowIndex);
     },
-    [gameStatus, isPlayMode, isLoggedIn, currentBalance, stakeAmount, playSound, showToast, onPlaceBet]
+    [gameStatus, isPlayMode, isLoggedIn, currentBalance, stakeAmount, playSound, showToast, onPlaceBet],
   );
 
   // 连接状态文本
@@ -244,22 +242,14 @@ const App: React.FC = () => {
 
       {/* Main Game Interface */}
       <main className="flex-1 relative">
-        <GameChart
-          gameEngineRef={gameEngineRef}
-          onPlaceBet={handlePlaceBet}
-          roundHash={roundHash}
-          basePrice={currentDisplayPrice}
-          startTime={startTime || Date.now()}
-        />
+        <GameChart gameEngineRef={gameEngineRef} onPlaceBet={handlePlaceBet} roundHash={roundHash} basePrice={currentDisplayPrice} startTime={startTime || Date.now()} />
 
         {/* 连接状态指示器 */}
         {(connecting || connectionError) && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-md border border-white/10 px-6 py-2 rounded-full flex items-center gap-6 shadow-2xl z-40 pointer-events-none">
             <div className="flex items-center gap-2">
               <div className={`w-1.5 h-1.5 rounded-full ${connecting ? "bg-yellow-500" : "bg-red-500"} animate-pulse`}></div>
-              <span className="text-[9px] font-heading font-black text-white/50 uppercase tracking-wider">
-                {connecting ? "连接服务器中..." : connectionError || "连接断开"}
-              </span>
+              <span className="text-[9px] font-heading font-black text-white/50 uppercase tracking-wider">{connecting ? "连接服务器中..." : connectionError || "连接断开"}</span>
             </div>
           </div>
         )}
@@ -267,12 +257,8 @@ const App: React.FC = () => {
         {/* Provably Fair 信息 */}
         {serverSeed && (
           <div className="absolute top-4 right-4 bg-black/60 backdrop-blur-md border border-green-500/30 px-4 py-2 rounded-lg z-40 pointer-events-none">
-            <div className="text-[9px] text-green-400 font-mono">
-              ✓ Server Seed Revealed
-            </div>
-            <div className="text-[8px] text-gray-400 font-mono truncate max-w-[200px]">
-              {serverSeed}
-            </div>
+            <div className="text-[9px] text-green-400 font-mono">✓ Server Seed Revealed</div>
+            <div className="text-[8px] text-gray-400 font-mono truncate max-w-50">{serverSeed}</div>
           </div>
         )}
       </main>
@@ -291,7 +277,11 @@ const App: React.FC = () => {
         activeBetsCount={activeBetsCount}
         isConnected={connected}
         connectionError={connectionStatusText}
-        onStartRound={() => {}} // 服务端自动管理回合
+        onStartRound={() => {
+          if (!connected && !connecting) {
+            connect(); // 首次点击时建立连接
+          }
+        }}
         onStopRound={() => {}} // 服务端自动管理回合
       />
 

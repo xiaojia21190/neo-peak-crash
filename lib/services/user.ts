@@ -90,7 +90,66 @@ export async function getUserBalance(userId: string): Promise<{
 }
 
 /**
- * 更新用户余额
+ * 原子性余额变动操作，自动记录流水
+ */
+export async function updateUserBalanceWithLedger(params: {
+  userId: string;
+  amount: number;
+  type: "RECHARGE" | "WITHDRAW" | "BET" | "WIN" | "REFUND";
+  relatedBetId?: string;
+  remark?: string;
+  orderNo?: string;
+  tradeNo?: string;
+}): Promise<{ balanceBefore: number; balanceAfter: number }> {
+  const { userId, amount, type, relatedBetId, remark, orderNo, tradeNo } = params;
+
+  return await prisma.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({
+      where: { id: userId },
+      select: { balance: true },
+    });
+
+    if (!user) {
+      throw new Error(`User ${userId} not found`);
+    }
+
+    const balanceBefore = Number(user.balance);
+
+    await tx.user.update({
+      where: { id: userId },
+      data: { balance: { increment: amount } },
+    });
+
+    const updatedUser = await tx.user.findUnique({
+      where: { id: userId },
+      select: { balance: true },
+    });
+
+    const balanceAfter = Number(updatedUser!.balance);
+
+    await tx.transaction.create({
+      data: {
+        userId,
+        type,
+        amount,
+        balanceBefore,
+        balanceAfter,
+        relatedBetId,
+        remark,
+        orderNo,
+        tradeNo,
+        status: "COMPLETED",
+        completedAt: new Date(),
+      },
+    });
+
+    return { balanceBefore, balanceAfter };
+  });
+}
+
+/**
+ * 更新用户余额（旧版本，保留兼容性）
+ * @deprecated 使用 updateUserBalanceWithLedger 代替
  */
 export async function updateUserBalance(
   userId: string,
@@ -333,32 +392,12 @@ export async function rechargeBalance(
   orderNo: string,
   tradeNo?: string
 ): Promise<number> {
-  // 使用事务确保数据一致性
-  const result = await prisma.$transaction(async (tx) => {
-    // 创建交易记录
-    await tx.transaction.create({
-      data: {
-        userId,
-        type: "RECHARGE",
-        amount: amount,
-        status: "COMPLETED",
-        orderNo,
-        tradeNo,
-        completedAt: new Date(),
-      },
-    });
-
-    // 更新用户余额
-    const user = await tx.user.update({
-      where: { id: userId },
-      data: {
-        balance: { increment: amount },
-      },
-      select: { balance: true },
-    });
-
-    return Number(user.balance);
+  const { balanceAfter } = await updateUserBalanceWithLedger({
+    userId,
+    amount,
+    type: "RECHARGE",
+    orderNo,
+    tradeNo,
   });
-
-  return result;
+  return balanceAfter;
 }

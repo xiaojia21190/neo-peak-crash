@@ -98,17 +98,27 @@ export class GameClient extends EventEmitter {
   /**
    * 连接到服务器
    */
-  connect(token: string): void {
+  connect(): void {
     if (this.socket?.connected) {
       return;
     }
 
+    // 清理旧连接
+    if (this.socket) {
+      this.socket.removeAllListeners();
+      this.socket.disconnect();
+      this.socket = null;
+    }
+
     this.socket = io(this.config.url, {
       transports: ['websocket', 'polling'],
-      autoConnect: true,
+      autoConnect: false,
+      reconnection: false, // 禁用自带重连
+      withCredentials: true, // 携带Cookie
     });
 
-    this.setupEventHandlers(token);
+    this.setupEventHandlers();
+    this.socket.connect();
   }
 
   /**
@@ -116,6 +126,7 @@ export class GameClient extends EventEmitter {
    */
   disconnect(): void {
     if (this.socket) {
+      this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
     }
@@ -177,18 +188,20 @@ export class GameClient extends EventEmitter {
   /**
    * 设置事件处理
    */
-  private setupEventHandlers(token: string): void {
+  private setupEventHandlers(): void {
     if (!this.socket) return;
 
-    // 连接成功
-    this.socket.on('connect', () => {
-      console.log('[GameClient] Connected, authenticating...');
+    // 捕获当前 socket 实例，避免回调中引用被替换的 this.socket
+    const socket = this.socket;
+
+    // 连接成功（服务端会自动从Cookie认证）
+    socket.on('connect', () => {
+      console.log('[GameClient] Connected, waiting for auth...');
       this.reconnectAttempts = 0;
-      this.socket!.emit(WS_EVENTS.AUTH, { token });
     });
 
     // 认证结果
-    this.socket.on(WS_EVENTS.AUTH_RESULT, (msg) => {
+    socket.on(WS_EVENTS.AUTH_RESULT, (msg) => {
       if (msg.payload.success) {
         this.isConnected = true;
         this.userId = msg.payload.userId;
@@ -201,7 +214,7 @@ export class GameClient extends EventEmitter {
     });
 
     // 回合开始
-    this.socket.on(WS_EVENTS.ROUND_START, (msg) => {
+    socket.on(WS_EVENTS.ROUND_START, (msg) => {
       this.state = {
         ...this.state,
         roundId: msg.payload.roundId,
@@ -222,13 +235,13 @@ export class GameClient extends EventEmitter {
     });
 
     // 回合运行中
-    this.socket.on(WS_EVENTS.ROUND_RUNNING, (msg) => {
+    socket.on(WS_EVENTS.ROUND_RUNNING, (msg) => {
       this.state.status = 'RUNNING';
       this.emit('round:running', { roundId: msg.payload.roundId });
     });
 
     // 状态更新
-    this.socket.on(WS_EVENTS.STATE_UPDATE, (msg) => {
+    socket.on(WS_EVENTS.STATE_UPDATE, (msg) => {
       this.state.elapsed = msg.payload.elapsed;
       this.state.currentPrice = msg.payload.currentPrice;
       this.state.currentRow = msg.payload.currentRow;
@@ -236,14 +249,14 @@ export class GameClient extends EventEmitter {
     });
 
     // 价格更新
-    this.socket.on(WS_EVENTS.PRICE_UPDATE, (msg) => {
+    socket.on(WS_EVENTS.PRICE_UPDATE, (msg) => {
       this.state.currentPrice = msg.payload.price;
       this.state.currentRow = msg.payload.rowIndex;
       this.emit('price', msg.payload);
     });
 
     // 投注确认
-    this.socket.on(WS_EVENTS.BET_CONFIRMED, (msg) => {
+    socket.on(WS_EVENTS.BET_CONFIRMED, (msg) => {
       const pending = this.pendingBets.get(msg.payload.orderId);
       if (pending) {
         clearTimeout(pending.timeout);
@@ -264,7 +277,7 @@ export class GameClient extends EventEmitter {
     });
 
     // 投注拒绝
-    this.socket.on(WS_EVENTS.BET_REJECTED, (msg) => {
+    socket.on(WS_EVENTS.BET_REJECTED, (msg) => {
       const pending = this.pendingBets.get(msg.payload.orderId);
       if (pending) {
         clearTimeout(pending.timeout);
@@ -275,7 +288,7 @@ export class GameClient extends EventEmitter {
     });
 
     // 投注结算
-    this.socket.on(WS_EVENTS.BET_SETTLED, (msg) => {
+    socket.on(WS_EVENTS.BET_SETTLED, (msg) => {
       const bet = this.state.activeBets.find((b) => b.betId === msg.payload.betId);
       if (bet) {
         bet.status = msg.payload.isWin ? 'WON' : 'LOST';
@@ -287,7 +300,7 @@ export class GameClient extends EventEmitter {
     });
 
     // 投注退款
-    this.socket.on(WS_EVENTS.BET_REFUNDED, (msg) => {
+    socket.on(WS_EVENTS.BET_REFUNDED, (msg) => {
       const bet = this.state.activeBets.find((b) => b.betId === msg.payload.betId);
       if (bet) {
         bet.status = 'REFUNDED';
@@ -296,37 +309,37 @@ export class GameClient extends EventEmitter {
     });
 
     // 回合结束
-    this.socket.on(WS_EVENTS.ROUND_END, (msg) => {
+    socket.on(WS_EVENTS.ROUND_END, (msg) => {
       this.state.status = 'COMPLETED';
       this.state.serverSeed = msg.payload.serverSeed;
       this.emit('round:end', msg.payload);
     });
 
     // 回合取消
-    this.socket.on(WS_EVENTS.ROUND_CANCELLED, (msg) => {
+    socket.on(WS_EVENTS.ROUND_CANCELLED, (msg) => {
       this.state.status = 'CANCELLED';
       this.state.serverSeed = msg.payload.serverSeed;
       this.emit('round:cancelled', msg.payload);
     });
 
     // 心跳响应
-    this.socket.on(WS_EVENTS.PONG, (msg) => {
+    socket.on(WS_EVENTS.PONG, (msg) => {
       this.emit('pong', msg);
     });
 
     // 断开连接
-    this.socket.on('disconnect', (reason) => {
+    socket.on('disconnect', (reason) => {
       console.log('[GameClient] Disconnected:', reason);
       this.isConnected = false;
       this.emit('disconnected', { reason });
 
       if (this.config.autoReconnect && reason !== 'io client disconnect') {
-        this.scheduleReconnect(token);
+        this.scheduleReconnect();
       }
     });
 
     // 连接错误
-    this.socket.on('connect_error', (error) => {
+    socket.on('connect_error', (error) => {
       console.error('[GameClient] Connection error:', error.message);
       this.emit('error', error);
     });
@@ -335,7 +348,7 @@ export class GameClient extends EventEmitter {
   /**
    * 安排重连
    */
-  private scheduleReconnect(token: string): void {
+  private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       console.error('[GameClient] Max reconnect attempts reached');
       this.emit('reconnect_failed');
@@ -349,7 +362,7 @@ export class GameClient extends EventEmitter {
 
     setTimeout(() => {
       if (!this.socket?.connected) {
-        this.connect(token);
+        this.connect();
       }
     }, this.config.reconnectInterval);
   }

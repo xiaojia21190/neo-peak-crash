@@ -121,10 +121,10 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
         {/* Start/Stop Button */}
         <button
           onClick={isRunning ? onStopRound : onStartRound}
-          disabled={!isConnected || isCrashed}
+          disabled={isCrashed}
           className={`px-16 h-14 rounded-2xl font-black text-xs uppercase italic tracking-[0.25em] transition-all shadow-2xl relative overflow-hidden group ${
             !isConnected
-              ? "bg-white/5 text-gray-600 cursor-not-allowed border border-white/5"
+              ? "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/40 active:scale-95"
               : isRunning
                 ? "bg-red-600 hover:bg-red-500 text-white shadow-red-600/40 active:scale-95"
                 : isCrashed
@@ -134,9 +134,9 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
         >
           {!isConnected ? (
             connectionError ? (
-              "Connection Failed"
+              "开始游戏"
             ) : (
-              "Connecting..."
+              "开始游戏"
             )
           ) : isRunning ? (
             <>

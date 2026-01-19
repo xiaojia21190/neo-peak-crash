@@ -2,10 +2,8 @@
  * 游戏引擎常量定义
  */
 
-// 行索引相关
-export const CENTER_ROW_INDEX = 6.5;        // 中心行索引
-export const PRICE_SENSITIVITY = 1000;      // 价格敏感度（1% 变动 = 10 行）
-export const MAX_ROW_INDEX = 1000;          // 最大行索引
+// Row index + odds config (canonical 0-based)
+export { HOUSE_EDGE, MIN_ROW_INDEX, MAX_ROW_INDEX, CENTER_ROW_INDEX, PRICE_SENSITIVITY } from '../shared/gameMath';
 
 // 时间相关
 export const MIN_TARGET_TIME_OFFSET = 0.5;  // 最小目标时间偏移（秒）

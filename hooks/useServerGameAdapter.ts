@@ -54,6 +54,10 @@ interface UseServerGameAdapterReturn {
   connecting: boolean;
   connectionError: string | null;
 
+  // 连接控制
+  connect: () => void;
+  disconnect: () => void;
+
   // 统计
   activeBetsCount: number;
   sessionPL: number;
@@ -114,7 +118,9 @@ export function useServerGameAdapter({
     placeBet,
     serverSeed,
     canBet,
-  } = useGameEngine({ autoConnect: true });
+    connect,
+    disconnect,
+  } = useGameEngine({ autoConnect: false });
 
   // 余额管理
   const balanceHook = useGameBalance({ userId, isLoggedIn, showToast });
@@ -294,6 +300,10 @@ export function useServerGameAdapter({
     connected,
     connecting,
     connectionError,
+
+    // 连接控制
+    connect,
+    disconnect,
 
     // 统计
     activeBetsCount: serverBets.length,

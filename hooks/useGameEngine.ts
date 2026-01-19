@@ -216,7 +216,7 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
   useEffect(() => {
     if (autoConnect && session?.user?.id && sessionStatus === 'authenticated' && !connected && !connecting) {
       setConnecting(true);
-      clientRef.current?.connect(session.user.id);
+      clientRef.current?.connect();
     }
   }, [autoConnect, session?.user?.id, sessionStatus, connected, connecting]);
 
@@ -231,7 +231,7 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
   const connect = useCallback(() => {
     if (session?.user?.id && !connected) {
       setConnecting(true);
-      clientRef.current?.connect(session.user.id);
+      clientRef.current?.connect();
     }
   }, [session?.user?.id, connected]);
 
