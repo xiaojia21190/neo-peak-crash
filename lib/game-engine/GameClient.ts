@@ -24,11 +24,9 @@ export interface ClientGameState {
   currentRow: number;
   elapsed: number;
   startTime: number;
-  commitHash: string;
   bettingDuration: number;
   maxDuration: number;
   activeBets: ClientBet[];
-  serverSeed?: string;
 }
 
 export interface ClientBet {
@@ -88,7 +86,6 @@ export class GameClient extends EventEmitter {
       currentRow: 6.5,
       elapsed: 0,
       startTime: 0,
-      commitHash: '',
       bettingDuration: 5,
       maxDuration: 60,
       activeBets: [],
@@ -225,11 +222,9 @@ export class GameClient extends EventEmitter {
         currentRow: 6.5,
         elapsed: 0,
         startTime: msg.payload.startTime,
-        commitHash: msg.payload.commitHash,
         bettingDuration: msg.payload.bettingDuration,
         maxDuration: msg.payload.maxDuration,
         activeBets: [],
-        serverSeed: undefined,
       };
       this.emit('round:start', this.state);
     });
@@ -311,14 +306,12 @@ export class GameClient extends EventEmitter {
     // 回合结束
     socket.on(WS_EVENTS.ROUND_END, (msg) => {
       this.state.status = 'COMPLETED';
-      this.state.serverSeed = msg.payload.serverSeed;
       this.emit('round:end', msg.payload);
     });
 
     // 回合取消
     socket.on(WS_EVENTS.ROUND_CANCELLED, (msg) => {
       this.state.status = 'CANCELLED';
-      this.state.serverSeed = msg.payload.serverSeed;
       this.emit('round:cancelled', msg.payload);
     });
 

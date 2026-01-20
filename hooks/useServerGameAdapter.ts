@@ -27,8 +27,6 @@ interface UseServerGameAdapterReturn {
   // 游戏状态
   gameStatus: ClientGameStatus;
   countdown: number;
-  roundHash: string;
-  serverSeed: string | null;
 
   // 价格信息
   basePrice: number;
@@ -102,7 +100,7 @@ export function useServerGameAdapter({
   showToast,
   stakeAmount,
 }: UseServerGameAdapterProps): UseServerGameAdapterReturn {
-  // 服务端游戏引擎
+  // 服务端游戏引擎（允许匿名连接）
   const {
     connected,
     connecting,
@@ -113,14 +111,12 @@ export function useServerGameAdapter({
     currentPrice,
     currentRow,
     elapsed,
-    commitHash,
     activeBets: serverBets,
     placeBet,
-    serverSeed,
     canBet,
     connect,
     disconnect,
-  } = useGameEngine({ autoConnect: false });
+  } = useGameEngine({ autoConnect: true });
 
   // 余额管理
   const balanceHook = useGameBalance({ userId, isLoggedIn, showToast });
@@ -287,8 +283,6 @@ export function useServerGameAdapter({
     gameEngineRef,
     gameStatus: mapServerStatusToClientStatus(serverStatus),
     countdown,
-    roundHash: commitHash,
-    serverSeed,
     basePrice: startPriceRef.current,
     startTime: startTimeRef.current,
     onPlaceBet,

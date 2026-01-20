@@ -16,27 +16,6 @@ export function calculateRowIndex(currentPrice: number, startPrice: number): num
 }
 
 /**
- * 生成服务端种子
- */
-export function generateServerSeed(): string {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-/**
- * 计算种子哈希（SHA256）
- */
-export function hashSeed(seed: string): string {
-  return crypto.createHash('sha256').update(seed).digest('hex');
-}
-
-/**
- * 验证种子哈希
- */
-export function verifySeedHash(seed: string, expectedHash: string): boolean {
-  return hashSeed(seed) === expectedHash;
-}
-
-/**
  * 生成唯一订单 ID
  */
 export function generateOrderId(): string {

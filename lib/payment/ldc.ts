@@ -157,6 +157,17 @@ export interface OrderQueryResult {
 /**
  * 查询订单状态
  */
+/**
+ * 查询支付订单状态
+ *
+ * 注意：根据 LDC 官方文档，查询接口要求使用 GET 方法，
+ * 并且 key 参数必须在 URL 查询字符串中。这是 LDC 平台的 API 设计，
+ * 存在一定的安全风险（密钥可能被代理/日志记录）。
+ * 建议：
+ * 1. 确保使用 HTTPS 传输
+ * 2. 严格控制日志输出（已实现）
+ * 3. 定期轮换 API 密钥
+ */
 export async function queryPaymentOrder(
   tradeNo: string
 ): Promise<OrderQueryResult> {

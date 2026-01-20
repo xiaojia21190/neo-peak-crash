@@ -41,7 +41,18 @@
       "Bash(test -f lib/services/user.ts)",
       "Bash(npx prisma migrate dev --name add_transaction_audit_fields --create-only)",
       "Bash(npx prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datamodel ./prisma/schema.prisma --script)",
-      "Bash(npx prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datasource ./prisma/schema.prisma --script)"
+      "Bash(npx prisma migrate diff --from-migrations ./prisma/migrations --to-schema-datasource ./prisma/schema.prisma --script)",
+      "Bash(npm run type-check)",
+      "Bash(npm run build)",
+      "Bash(node --test:*)",
+      "mcp__sequential-thinking__sequentialthinking",
+      "Bash(codex --search exec:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(python:*)",
+      "Bash(npx prisma migrate:*)",
+      "Bash(npx prisma db execute:*)",
+      "Bash(npx prisma generate:*)",
+      "Bash(npx prisma validate:*)"
     ]
   }
 }

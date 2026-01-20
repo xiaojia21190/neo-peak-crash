@@ -199,7 +199,6 @@ export async function recordBet(data: {
   rowIndex: number;
   colIndex: number;
   asset: string;
-  roundHash?: string;
   isPlayMode: boolean;
 }): Promise<string> {
   const bet = await prisma.bet.create({
@@ -210,7 +209,6 @@ export async function recordBet(data: {
       rowIndex: data.rowIndex,
       colIndex: data.colIndex,
       asset: data.asset,
-      roundHash: data.roundHash,
       isPlayMode: data.isPlayMode,
     },
   });

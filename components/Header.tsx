@@ -33,7 +33,8 @@ interface HeaderProps {
   onOpenRecharge: () => void;
 }
 
-const ASSETS = ["BTC", "ETH", "SOL", "XRP", "DOGE"];
+// 服务端目前只支持 BTC，暂时隐藏其他资产
+const ASSETS = ["BTC"];
 
 const getAssetName = (symbol: string) => {
   switch (symbol) {

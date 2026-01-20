@@ -277,11 +277,7 @@ const App: React.FC = () => {
         activeBetsCount={activeBetsCount}
         isConnected={connected}
         connectionError={connectionStatusText}
-        onStartRound={() => {
-          if (!connected && !connecting) {
-            connect(); // 首次点击时建立连接
-          }
-        }}
+        onStartRound={() => {}} // 自动连接，无需手动触发
         onStopRound={() => {}} // 服务端自动管理回合
       />
 

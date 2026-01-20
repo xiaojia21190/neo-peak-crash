@@ -39,7 +39,6 @@ export interface GameState {
   candles: Candlestick[];
   countdown: number;
   streaks: Record<string, StreakState>; // Track streaks per asset symbol
-  roundHash: string; // Unique hash for provably fair verification
 }
 
 // NEW: Mutable state for high-frequency animation loop

@@ -26,7 +26,6 @@ export interface UseGameEngineReturn {
   currentPrice: number;
   currentRow: number;
   elapsed: number;
-  commitHash: string;
 
   // 投注
   activeBets: ClientBet[];
@@ -38,7 +37,6 @@ export interface UseGameEngineReturn {
   disconnect: () => void;
 
   // 回合信息
-  serverSeed: string | null;
   isRoundActive: boolean;
   canBet: boolean;
 }
@@ -158,25 +156,23 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
       );
     };
 
-    const handleRoundEnd = (data: { serverSeed: string }) => {
+    const handleRoundEnd = () => {
       setState((prev: ClientGameState | null) =>
         prev
           ? {
               ...prev,
               status: 'COMPLETED' as const,
-              serverSeed: data.serverSeed,
             }
           : null
       );
     };
 
-    const handleRoundCancelled = (data: { serverSeed: string }) => {
+    const handleRoundCancelled = () => {
       setState((prev: ClientGameState | null) =>
         prev
           ? {
               ...prev,
               status: 'CANCELLED' as const,
-              serverSeed: data.serverSeed,
             }
           : null
       );
@@ -212,13 +208,13 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
     };
   }, []);
 
-  // 自动连接
+  // 自动连接（允许匿名连接观看游戏）
   useEffect(() => {
-    if (autoConnect && session?.user?.id && sessionStatus === 'authenticated' && !connected && !connecting) {
+    if (autoConnect && !connected && !connecting) {
       setConnecting(true);
       clientRef.current?.connect();
     }
-  }, [autoConnect, session?.user?.id, sessionStatus, connected, connecting]);
+  }, [autoConnect, connected, connecting]);
 
   // 清理
   useEffect(() => {
@@ -227,13 +223,13 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
     };
   }, []);
 
-  // 连接方法
+  // 连接方法（允许匿名连接）
   const connect = useCallback(() => {
-    if (session?.user?.id && !connected) {
+    if (!connected) {
       setConnecting(true);
       clientRef.current?.connect();
     }
-  }, [session?.user?.id, connected]);
+  }, [connected]);
 
   // 断开方法
   const disconnect = useCallback(() => {
@@ -282,7 +278,6 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
     currentPrice: state?.currentPrice ?? 0,
     currentRow: state?.currentRow ?? 6.5,
     elapsed: state?.elapsed ?? 0,
-    commitHash: state?.commitHash ?? '',
 
     // 投注
     activeBets: state?.activeBets ?? [],
@@ -294,7 +289,6 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
     disconnect,
 
     // 回合信息
-    serverSeed: state?.serverSeed ?? null,
     isRoundActive,
     canBet,
   };

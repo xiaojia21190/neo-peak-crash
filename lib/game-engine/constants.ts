@@ -45,7 +45,6 @@ export const WS_EVENTS = {
   PLACE_BET: 'place_bet',
   CANCEL_BET: 'cancel_bet',
   PING: 'ping',
-  VERIFY_ROUND: 'verify_round',
 
   // 服务端 -> 客户端
   AUTH_RESULT: 'auth_result',

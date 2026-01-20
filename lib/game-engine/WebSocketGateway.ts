@@ -154,7 +154,6 @@ export class WebSocketGateway {
             currentPrice: currentState.currentPrice,
             currentRow: currentState.currentRow,
             elapsed: currentState.elapsed,
-            commitHash: currentState.commitHash,
             bettingDuration: this.gameEngine.getConfig().bettingDuration,
             maxDuration: this.gameEngine.getConfig().maxDuration,
           },
@@ -238,31 +237,60 @@ export class WebSocketGateway {
       });
     });
 
-    // 投注确认（仅发送给下注用户）
+    // 投注确认（发送给下注用户，包括匿名用户）
     this.gameEngine.on('bet:confirmed', (data) => {
-      this.emitToUser(data.userId, WS_EVENTS.BET_CONFIRMED, {
-        type: WS_EVENTS.BET_CONFIRMED,
-        payload: data,
-        timestamp: Date.now(),
-      });
+      if (data.userId.startsWith('anon-')) {
+        // 匿名用户：直接通过 socket.id 发送
+        const socketId = data.userId.replace('anon-', '');
+        this.io.to(socketId).emit(WS_EVENTS.BET_CONFIRMED, {
+          type: WS_EVENTS.BET_CONFIRMED,
+          payload: data,
+          timestamp: Date.now(),
+        });
+      } else {
+        // 已登录用户：通过用户房间发送
+        this.emitToUser(data.userId, WS_EVENTS.BET_CONFIRMED, {
+          type: WS_EVENTS.BET_CONFIRMED,
+          payload: data,
+          timestamp: Date.now(),
+        });
+      }
     });
 
     // 投注结算
     this.gameEngine.on('bet:settled', (data) => {
-      this.emitToUser(data.userId, WS_EVENTS.BET_SETTLED, {
-        type: WS_EVENTS.BET_SETTLED,
-        payload: data,
-        timestamp: Date.now(),
-      });
+      if (data.userId.startsWith('anon-')) {
+        const socketId = data.userId.replace('anon-', '');
+        this.io.to(socketId).emit(WS_EVENTS.BET_SETTLED, {
+          type: WS_EVENTS.BET_SETTLED,
+          payload: data,
+          timestamp: Date.now(),
+        });
+      } else {
+        this.emitToUser(data.userId, WS_EVENTS.BET_SETTLED, {
+          type: WS_EVENTS.BET_SETTLED,
+          payload: data,
+          timestamp: Date.now(),
+        });
+      }
     });
 
     // 投注退款
     this.gameEngine.on('bet:refunded', (data) => {
-      this.emitToUser(data.userId, WS_EVENTS.BET_REFUNDED, {
-        type: WS_EVENTS.BET_REFUNDED,
-        payload: data,
-        timestamp: Date.now(),
-      });
+      if (data.userId.startsWith('anon-')) {
+        const socketId = data.userId.replace('anon-', '');
+        this.io.to(socketId).emit(WS_EVENTS.BET_REFUNDED, {
+          type: WS_EVENTS.BET_REFUNDED,
+          payload: data,
+          timestamp: Date.now(),
+        });
+      } else {
+        this.emitToUser(data.userId, WS_EVENTS.BET_REFUNDED, {
+          type: WS_EVENTS.BET_REFUNDED,
+          payload: data,
+          timestamp: Date.now(),
+        });
+      }
     });
 
     // 价格更新
@@ -332,6 +360,7 @@ export class WebSocketGateway {
 
   /**
    * 自动从Cookie认证
+   * 允许匿名连接观看游戏，但真金投注需要登录
    */
   private async handleAutoAuth(socket: AuthenticatedSocket): Promise<void> {
     try {
@@ -343,12 +372,15 @@ export class WebSocketGateway {
       const userId = await this.verifyTokenFromCookie(socket);
 
       if (!userId) {
+        // 允许匿名连接（游玩模式）
+        socket.userId = undefined;
+        socket.isAuthenticated = false;
         socket.emit(WS_EVENTS.AUTH_RESULT, {
           type: WS_EVENTS.AUTH_RESULT,
-          payload: { success: false, error: '认证失败' },
+          payload: { success: true, userId: null, isAnonymous: true },
           timestamp: Date.now(),
         });
-        socket.disconnect(true);
+        console.log(`[WSGateway] Anonymous user connected: ${socket.id}`);
         return;
       }
 
@@ -373,12 +405,14 @@ export class WebSocketGateway {
       console.log(`[WSGateway] User ${userId} authenticated via cookie`);
     } catch (error) {
       console.error('[WSGateway] Auto auth failed:', error);
+      // 降级为匿名连接
+      socket.userId = undefined;
+      socket.isAuthenticated = false;
       socket.emit(WS_EVENTS.AUTH_RESULT, {
         type: WS_EVENTS.AUTH_RESULT,
-        payload: { success: false, error: '认证失败' },
+        payload: { success: true, userId: null, isAnonymous: true },
         timestamp: Date.now(),
       });
-      socket.disconnect(true);
     }
   }
 
@@ -427,13 +461,14 @@ export class WebSocketGateway {
       return;
     }
 
-    if (!socket.isAuthenticated || !socket.userId) {
+    // 真金模式必须登录，游玩模式允许匿名
+    if (!data.isPlayMode && (!socket.isAuthenticated || !socket.userId)) {
       socket.emit(WS_EVENTS.BET_REJECTED, {
         type: WS_EVENTS.BET_REJECTED,
         payload: {
           orderId: data.orderId,
           code: 'UNAUTHORIZED',
-          message: '请先登录',
+          message: '真金投注需要登录',
         },
         timestamp: Date.now(),
       });
@@ -441,7 +476,9 @@ export class WebSocketGateway {
     }
 
     try {
-      await this.gameEngine.placeBet(socket.userId, data);
+      // 游玩模式允许匿名，使用临时 ID
+      const effectiveUserId = socket.userId ?? `anon-${socket.id}`;
+      await this.gameEngine.placeBet(effectiveUserId, data);
       // 注意: bet_confirmed 事件会由 GameEngine 通过 emit('bet:confirmed') 触发
       // setupGameEngineListeners() 会监听该事件并发送给用户,无需在此处重复发送
     } catch (error) {
@@ -528,7 +565,6 @@ export class WebSocketGateway {
   private async verifyTokenFromCookie(socket: AuthenticatedSocket): Promise<string | null> {
     try {
       const cookieHeader = socket.request.headers.cookie;
-      console.log("cookieHeader=", cookieHeader);
       if (!cookieHeader) {
         return null;
       }

@@ -31,8 +31,6 @@ import {
 import {
   calculateRowIndex,
   calculateMultiplier,
-  generateServerSeed,
-  hashSeed,
 } from './utils';
 import { roundMoney } from '../shared/gameMath';
 import { GameError } from './errors';
@@ -44,11 +42,13 @@ export class GameEngine extends EventEmitter {
   private config: RoundConfig;
   private state: GameState | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
-  private serverSeed: string | null = null;
 
   // 结算队列（异步批处理）
   private settlementQueue: SettlementItem[] = [];
   private isSettling = false;
+
+  // 投注时间索引（最小堆：按 targetTime 排序）
+  private betHeap: ServerBet[] = [];
 
   // 价格快照缓冲
   private priceSnapshotBuffer: Array<{
@@ -137,66 +137,65 @@ export class GameEngine extends EventEmitter {
       throw new GameError(ERROR_CODES.NO_ACTIVE_ROUND, '无法获取回合锁，可能有其他实例正在运行');
     }
 
-    // 2. 检查价格可用性
-    const startPrice = this.priceService.getLatestPrice();
-    if (!startPrice) {
+    try {
+      // 2. 检查价格可用性
+      const startPrice = this.priceService.getLatestPrice();
+      if (!startPrice) {
+        throw new GameError(ERROR_CODES.PRICE_UNAVAILABLE, '价格服务不可用');
+      }
+
+      const now = Date.now();
+
+      // 3. 创建回合记录
+      const round = await this.prisma.round.create({
+        data: {
+          asset: this.config.asset,
+          status: 'BETTING',
+          startPrice: startPrice.price,
+          startedAt: new Date(now),
+        },
+      });
+
+      // 5. 初始化状态
+      this.state = {
+        roundId: round.id,
+        status: 'BETTING',
+        asset: this.config.asset,
+        startPrice: startPrice.price,
+        currentPrice: startPrice.price,
+        currentRow: CENTER_ROW_INDEX,
+        elapsed: 0,
+        roundStartTime: now,
+        activeBets: new Map(),
+      };
+
+      // 6. 同步到 Redis
+      await this.syncStateToRedis();
+
+      // 7. 启动 Tick 循环
+      this.startTickLoop();
+
+      // 8. 广播回合开始
+      this.emit('round:start', {
+        roundId: round.id,
+        asset: this.config.asset,
+        startPrice: startPrice.price,
+        startTime: now,
+        bettingDuration: this.config.bettingDuration,
+        maxDuration: this.config.maxDuration,
+      });
+
+      // 9. 投注阶段倒计时
+      setTimeout(() => this.transitionToRunning(), this.config.bettingDuration * 1000);
+
+      console.log(`[GameEngine] Round ${round.id} started`);
+    } catch (error) {
+      // 释放锁并重新抛出错误
+      console.error(`[GameEngine] startRound failed, releasing lock:`, error);
       await this.distributedLock.release(lockKey, this.roundLockToken);
       this.roundLockToken = null;
-      throw new GameError(ERROR_CODES.PRICE_UNAVAILABLE, '价格服务不可用');
+      throw error;
     }
-
-    // 3. 生成 Provably Fair 种子（仅内存保存）
-    this.serverSeed = generateServerSeed();
-    const commitHash = hashSeed(this.serverSeed);
-
-    const now = Date.now();
-
-    // 4. 创建回合记录（不存储 serverSeed 明文）
-    const round = await this.prisma.round.create({
-      data: {
-        asset: this.config.asset,
-        status: 'BETTING',
-        commitHash,
-        startPrice: startPrice.price,
-        startedAt: new Date(now),
-      },
-    });
-
-    // 5. 初始化状态
-    this.state = {
-      roundId: round.id,
-      status: 'BETTING',
-      asset: this.config.asset,
-      startPrice: startPrice.price,
-      currentPrice: startPrice.price,
-      currentRow: CENTER_ROW_INDEX,
-      elapsed: 0,
-      roundStartTime: now,
-      commitHash,
-      activeBets: new Map(),
-    };
-
-    // 6. 同步到 Redis
-    await this.syncStateToRedis();
-
-    // 7. 启动 Tick 循环
-    this.startTickLoop();
-
-    // 8. 广播回合开始
-    this.emit('round:start', {
-      roundId: round.id,
-      asset: this.config.asset,
-      commitHash,
-      startPrice: startPrice.price,
-      startTime: now,
-      bettingDuration: this.config.bettingDuration,
-      maxDuration: this.config.maxDuration,
-    });
-
-    // 9. 投注阶段倒计时
-    setTimeout(() => this.transitionToRunning(), this.config.bettingDuration * 1000);
-
-    console.log(`[GameEngine] Round ${round.id} started`);
   }
 
   /**
@@ -227,7 +226,6 @@ export class GameEngine extends EventEmitter {
 
     const roundId = this.state.roundId;
     const endPrice = this.state.currentPrice;
-    const serverSeed = this.serverSeed;
     console.log(`[GameEngine] Ending round ${roundId} (reason: ${reason})`);
 
     // 1. 停止 Tick
@@ -312,13 +310,12 @@ export class GameEngine extends EventEmitter {
       // 7. 计算统计
       const stats = this.calculateRoundStats();
 
-      // 8. 更新数据库（此时才写入 serverSeed 明文）
+      // 8. 更新数据库
       await this.prisma.round
         .update({
           where: { id: roundId },
           data: {
             status: 'COMPLETED',
-            serverSeed,
             endPrice,
             endedAt: new Date(),
             totalBets: stats.totalBets,
@@ -333,7 +330,6 @@ export class GameEngine extends EventEmitter {
       // 9. 广播回合结束（即使 DB 更新失败，也尽量通知客户端结束）
       this.emit('round:end', {
         roundId,
-        serverSeed: serverSeed!,
         endPrice,
         reason,
         stats: {
@@ -349,7 +345,6 @@ export class GameEngine extends EventEmitter {
         const stats = this.calculateRoundStats();
         this.emit('round:end', {
           roundId,
-          serverSeed: serverSeed ?? '',
           endPrice,
           reason: 'crash',
           stats: {
@@ -403,47 +398,59 @@ export class GameEngine extends EventEmitter {
     const roundId = this.state.roundId;
     console.log(`[GameEngine] Cancelling round ${roundId} (reason: ${reason})`);
 
-    // 1. 停止 Tick
-    this.stopTickLoop();
-
-    // 3. 退款所有待结算投注
-    const pendingBets = Array.from(this.state.activeBets.values()).filter(
-      (b) => b.status === 'PENDING'
-    );
-
-    for (const bet of pendingBets) {
-      await this.refundBet(bet, reason);
-    }
-
-    // 4. 更新数据库
-    await this.prisma.round.update({
-      where: { id: roundId },
-      data: {
-        status: 'CANCELLED',
-        serverSeed: this.serverSeed,
-        endedAt: new Date(),
-      },
-    });
-
-    // 5. 广播回合取消
-    this.emit('round:cancelled', {
-      roundId,
-      serverSeed: this.serverSeed!,
-      reason,
-      refundedBets: pendingBets.length,
-    });
-
-    // 6. 清理Redis ACTIVE_BETS键
     try {
-      await this.redis.del(`${REDIS_KEYS.ACTIVE_BETS}${roundId}`);
-    } catch (error) {
-      console.error(`[GameEngine] Failed to delete Redis ACTIVE_BETS key for round ${roundId}:`, error);
+      // 1. 停止 Tick
+      this.stopTickLoop();
+
+      // 3. 退款所有待结算投注
+      const pendingBets = Array.from(this.state.activeBets.values()).filter(
+        (b) => b.status === 'PENDING'
+      );
+
+      for (const bet of pendingBets) {
+        await this.refundBet(bet, reason);
+      }
+
+      // 4. 更新数据库
+      await this.prisma.round.update({
+        where: { id: roundId },
+        data: {
+          status: 'CANCELLED',
+          endedAt: new Date(),
+        },
+      });
+
+      // 5. 广播回合取消
+      this.emit('round:cancelled', {
+        roundId,
+        reason,
+        refundedBets: pendingBets.length,
+      });
+
+      // 6. 清理Redis ACTIVE_BETS键
+      try {
+        await this.redis.del(`${REDIS_KEYS.ACTIVE_BETS}${roundId}`);
+      } catch (error) {
+        console.error(`[GameEngine] Failed to delete Redis ACTIVE_BETS key for round ${roundId}:`, error);
+      }
+
+      console.log(`[GameEngine] Round ${roundId} cancelled, ${pendingBets.length} bets refunded`);
+    } finally {
+      // 7. 释放分布式锁
+      if (this.roundLockToken) {
+        const lockKey = `${REDIS_KEYS.ROUND_STATE}${this.config.asset}:lock`;
+        try {
+          await this.distributedLock.release(lockKey, this.roundLockToken);
+        } catch (error) {
+          console.error(`[GameEngine] Failed to release round lock:`, error);
+        } finally {
+          this.roundLockToken = null;
+        }
+      }
+
+      // 8. 清理
+      this.cleanup();
     }
-
-    // 7. 清理
-    this.cleanup();
-
-    console.log(`[GameEngine] Round ${roundId} cancelled, ${pendingBets.length} bets refunded`);
   }
 
   /**
@@ -599,12 +606,22 @@ export class GameEngine extends EventEmitter {
       throw new GameError(ERROR_CODES.INVALID_AMOUNT, '无效的倍率');
     }
 
-    // 8. 幂等性检查：先查询orderId是否已存在
+    // 8. 订单ID验证
+    if (!request.orderId || typeof request.orderId !== 'string' || request.orderId.trim() === '') {
+      throw new GameError(ERROR_CODES.INVALID_AMOUNT, '订单ID不能为空');
+    }
+
+    // 9. 幂等性检查：先查询orderId是否已存在
     const existingBet = await this.prisma.bet.findUnique({
       where: { orderId: request.orderId },
     });
 
     if (existingBet) {
+      // 验证用户所有权
+      if (existingBet.userId !== userId) {
+        console.warn(`[GameEngine] Order ID ${request.orderId} belongs to different user`);
+        throw new GameError(ERROR_CODES.DUPLICATE_BET, '订单ID已被使用');
+      }
       console.log(`[GameEngine] Duplicate bet request: ${request.orderId}`);
       return {
         betId: existingBet.id,
@@ -622,7 +639,8 @@ export class GameEngine extends EventEmitter {
     }
 
     try {
-      // 9. 原子扣款 + 记录投注
+      // 9. 原子扣款 + 记录投注（匿名用户游玩模式跳过数据库操作）
+      const isAnonymous = userId.startsWith('anon-');
       const bet = await this.prisma.$transaction(async (tx) => {
         // 在事务内二次校验回合状态,防止与endRound并发
         const currentRound = await tx.round.findUnique({
@@ -634,33 +652,43 @@ export class GameEngine extends EventEmitter {
           throw new GameError(ERROR_CODES.BETTING_CLOSED, '回合已关闭或不存在');
         }
 
-        const balanceField = request.isPlayMode ? 'playBalance' : 'balance';
-
-        // 获取当前余额（用于流水记录）
-        const user = await tx.user.findUnique({
-          where: { id: userId },
-          select: { balance: true, playBalance: true },
-        });
-
-        if (!user) {
-          throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '用户不存在');
+        // 匿名用户只能游玩模式，跳过余额检查
+        if (isAnonymous && !request.isPlayMode) {
+          throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '匿名用户只能使用游玩模式');
         }
 
-        const currentBalance = Number(balanceField === 'balance' ? user.balance : user.playBalance);
+        let currentBalance = 0;
 
-        // 原子条件更新
-        const updateResult = await tx.user.updateMany({
-          where: {
-            id: userId,
-            [balanceField]: { gte: request.amount },
-          },
-          data: {
-            [balanceField]: { decrement: request.amount },
-          },
-        });
+        // 非匿名用户需要扣款
+        if (!isAnonymous) {
+          const balanceField = request.isPlayMode ? 'playBalance' : 'balance';
 
-        if (updateResult.count === 0) {
-          throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '余额不足');
+          // 获取当前余额（用于流水记录）
+          const user = await tx.user.findUnique({
+            where: { id: userId },
+            select: { balance: true, playBalance: true },
+          });
+
+          if (!user) {
+            throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '用户不存在');
+          }
+
+          currentBalance = Number(balanceField === 'balance' ? user.balance : user.playBalance);
+
+          // 原子条件更新
+          const updateResult = await tx.user.updateMany({
+            where: {
+              id: userId,
+              [balanceField]: { gte: request.amount },
+            },
+            data: {
+              [balanceField]: { decrement: request.amount },
+            },
+          });
+
+          if (updateResult.count === 0) {
+            throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '余额不足');
+          }
         }
 
         // 创建投注记录（包含orderId）
@@ -681,8 +709,8 @@ export class GameEngine extends EventEmitter {
           },
         });
 
-        // 记录流水（仅真实余额）
-        if (!request.isPlayMode) {
+        // 记录流水（仅真实余额且非匿名）
+        if (!request.isPlayMode && !isAnonymous) {
           await tx.transaction.create({
             data: {
               userId,
@@ -716,6 +744,7 @@ export class GameEngine extends EventEmitter {
       };
 
       this.state.activeBets.set(bet.id, serverBet);
+      this.heapPush(serverBet);
 
       // 10. 同步到 Redis（异步）
       setImmediate(() => {
@@ -728,11 +757,17 @@ export class GameEngine extends EventEmitter {
           .catch((err) => console.error('[GameEngine] Redis sync failed:', err));
       });
 
-      // 11. 获取最新余额
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { balance: true, playBalance: true },
-      });
+      // 11. 获取最新余额（匿名用户返回 0）
+      let newBalance = 0;
+      if (!isAnonymous) {
+        const user = await this.prisma.user.findUnique({
+          where: { id: userId },
+          select: { balance: true, playBalance: true },
+        });
+        newBalance = request.isPlayMode
+          ? Number(user?.playBalance ?? 0)
+          : Number(user?.balance ?? 0);
+      }
 
       // 12. 广播投注确认（包含 userId 和余额信息用于定向发送）
       this.emit('bet:confirmed', {
@@ -743,9 +778,7 @@ export class GameEngine extends EventEmitter {
         targetRow: request.targetRow,
         targetTime: request.targetTime,
         amount: request.amount,
-        newBalance: request.isPlayMode
-          ? Number(user?.playBalance ?? 0)
-          : Number(user?.balance ?? 0),
+        newBalance,
       });
 
       console.log(`[GameEngine] Bet ${bet.id} placed by ${userId}`);
@@ -792,7 +825,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 核心 Tick 循环 - 非阻塞设计
+   * 核心 Tick 循环 - 使用最小堆优化
    */
   private tick(): void {
     if (!this.state || this.state.status === 'SETTLING' || this.state.status === 'COMPLETED') {
@@ -808,47 +841,53 @@ export class GameEngine extends EventEmitter {
       this.state.currentRow = calculateRowIndex(this.priceCache.price, this.state.startPrice);
     }
 
-    // 2. 碰撞检测（使用 targetTime bucketing 优化）
+    // 2. 碰撞检测（最小堆优化：只处理即将到期的投注）
     const prevRow = this.state.prevRow ?? this.state.currentRow;
     const toSettle: SettlementItem[] = [];
 
-    // Bucketing: 只检查时间窗口内的投注
-    const bucketWindow = parseFloat(process.env.BUCKET_WINDOW ?? '2');
-    const minTargetTime = this.state.elapsed - bucketWindow;
-    const maxTargetTime = this.state.elapsed + bucketWindow;
+    // 从堆顶取出所有在检测窗口内的投注
+    while (this.betHeap.length > 0) {
+      const bet = this.betHeap[0];
 
-    for (const [, bet] of this.state.activeBets) {
-      if (bet.status !== 'PENDING') continue;
+      // 堆顶投注还未进入检测窗口，后续投注更晚，直接退出
+      if (bet.targetTime > this.state.elapsed + HIT_TIME_TOLERANCE) break;
 
-      // 先过滤时间窗口
-      if (bet.targetTime < minTargetTime || bet.targetTime > maxTargetTime) continue;
+      // 已超过 MISS 窗口，标记为失败
+      if (this.state.elapsed > bet.targetTime + MISS_TIME_BUFFER) {
+        this.heapPop();
+        if (bet.status === 'PENDING') {
+          toSettle.push({ bet, isWin: false });
+          bet.status = 'SETTLING';
+        }
+        continue;
+      }
 
+      // 在检测窗口内，检查碰撞
       const timeDiff = Math.abs(this.state.elapsed - bet.targetTime);
-      const isInTimeWindow = timeDiff <= HIT_TIME_TOLERANCE;
-
-      if (isInTimeWindow) {
-        // 行交叉检测
+      if (timeDiff <= HIT_TIME_TOLERANCE) {
         const minRow = Math.min(prevRow, this.state.currentRow) - this.config.hitTolerance;
         const maxRow = Math.max(prevRow, this.state.currentRow) + this.config.hitTolerance;
 
         if (bet.targetRow >= minRow && bet.targetRow <= maxRow) {
-          toSettle.push({
-            bet,
-            isWin: true,
-            hitDetails: {
-              hitPrice: this.state.currentPrice,
-              hitRow: this.state.currentRow,
-              hitTime: this.state.elapsed,
-            },
-          });
-          // 立即标记为SETTLING,防止重复入队
-          bet.status = 'SETTLING';
+          this.heapPop();
+          if (bet.status === 'PENDING') {
+            toSettle.push({
+              bet,
+              isWin: true,
+              hitDetails: {
+                hitPrice: this.state.currentPrice,
+                hitRow: this.state.currentRow,
+                hitTime: this.state.elapsed,
+              },
+            });
+            bet.status = 'SETTLING';
+          }
+          continue;
         }
-      } else if (this.state.elapsed > bet.targetTime + MISS_TIME_BUFFER) {
-        toSettle.push({ bet, isWin: false });
-        // 立即标记为SETTLING,防止重复入队
-        bet.status = 'SETTLING';
       }
+
+      // 还在窗口内但未命中，保留在堆中等待下一帧
+      break;
     }
 
     // 3. 保存上一帧行索引
@@ -883,19 +922,18 @@ export class GameEngine extends EventEmitter {
   // ========== 结算处理 ==========
 
   /**
-   * 结算所有待结算投注
+   * 结算所有待结算投注（回合结束时调用）
    */
   private settleAllPendingBets(): void {
-    const pendingBets = Array.from(this.state!.activeBets.values()).filter(
-      (b) => b.status === 'PENDING'
-    );
+    // 清空堆中所有剩余投注
+    while (this.betHeap.length > 0) {
+      const bet = this.heapPop()!;
+      if (bet.status !== 'PENDING') continue;
 
-    for (const bet of pendingBets) {
       const timeDiff = Math.abs(this.state!.elapsed - bet.targetTime);
       const rowDiff = Math.abs(this.state!.currentRow - bet.targetRow);
       const isWin = timeDiff <= HIT_TIME_TOLERANCE && rowDiff <= this.config.hitTolerance;
 
-      // 立即标记为SETTLING,防止重复入队
       bet.status = 'SETTLING';
 
       this.settlementQueue.push({
@@ -931,15 +969,26 @@ export class GameEngine extends EventEmitter {
         while (retryCount <= maxRetries) {
           try {
             await this.prisma.$transaction(async (tx) => {
-              for (const { bet, isWin, hitDetails } of batch) {
-                const payout = isWin ? roundMoney(bet.amount * bet.multiplier) : 0;
+              // 按用户聚合投注，减少数据库查询次数
+              const userAggregates = new Map<string, {
+                bets: Array<{ bet: typeof batch[0]['bet'], isWin: boolean, hitDetails: typeof batch[0]['hitDetails'], payout: number }>,
+                totalPayout: number,
+                totalPayoutPlay: number,
+                totalBets: number,
+                totalWins: number,
+                totalLosses: number,
+                totalProfit: number,
+                transactions: Array<{ amount: number, relatedBetId: string, remark: string }>,
+              }>();
 
-                // 使用updateMany实现幂等性:只更新PENDING状态的注单
+              // 第一阶段：更新投注状态并聚合用户数据
+              for (const { bet, isWin, hitDetails } of batch) {
+                // 确保 multiplier 舍入一致性
+                const roundedMultiplier = Math.round(bet.multiplier * 10000) / 10000;
+                const payout = isWin ? roundMoney(bet.amount * roundedMultiplier) : 0;
+
                 const updated = await tx.bet.updateMany({
-                  where: {
-                    id: bet.id,
-                    status: 'PENDING',
-                  },
+                  where: { id: bet.id, status: 'PENDING' },
                   data: {
                     status: isWin ? 'WON' : 'LOST',
                     isWin,
@@ -951,53 +1000,79 @@ export class GameEngine extends EventEmitter {
                   },
                 });
 
-                // 只有成功更新1条记录才执行加钱和统计
                 if (updated.count === 1) {
+                  const agg = userAggregates.get(bet.userId) || {
+                    bets: [],
+                    totalPayout: 0,
+                    totalPayoutPlay: 0,
+                    totalBets: 0,
+                    totalWins: 0,
+                    totalLosses: 0,
+                    totalProfit: 0,
+                    transactions: [],
+                  };
+
+                  agg.bets.push({ bet, isWin, hitDetails, payout });
                   if (isWin && payout > 0) {
-                    const balanceField = bet.isPlayMode ? 'playBalance' : 'balance';
-
-                    // 获取当前余额（用于流水记录）
-                    const user = await tx.user.findUnique({
-                      where: { id: bet.userId },
-                      select: { balance: true, playBalance: true },
-                    });
-
-                    const currentBalance = Number(balanceField === 'balance' ? user!.balance : user!.playBalance);
-
-                    await tx.user.update({
-                      where: { id: bet.userId },
-                      data: { [balanceField]: { increment: payout } },
-                    });
-
-                    // 记录流水（仅真实余额）
-                    if (!bet.isPlayMode) {
-                      await tx.transaction.create({
-                        data: {
-                          userId: bet.userId,
-                          type: 'WIN',
-                          amount: payout,
-                          balanceBefore: currentBalance,
-                          balanceAfter: currentBalance + payout,
-                          relatedBetId: bet.id,
-                          remark: `赢得投注 ${bet.id}`,
-                          status: 'COMPLETED',
-                          completedAt: new Date(),
-                        },
-                      });
+                    if (bet.isPlayMode) {
+                      agg.totalPayoutPlay += payout;
+                    } else {
+                      agg.totalPayout += payout;
+                      agg.transactions.push({ amount: payout, relatedBetId: bet.id, remark: `赢得投注 ${bet.id}` });
                     }
                   }
+                  agg.totalBets++;
+                  if (isWin) agg.totalWins++;
+                  else agg.totalLosses++;
+                  agg.totalProfit += isWin ? payout - bet.amount : -bet.amount;
 
-                  await tx.user.update({
-                    where: { id: bet.userId },
-                    data: {
-                      totalBets: { increment: 1 },
-                      totalWins: isWin ? { increment: 1 } : undefined,
-                      totalLosses: !isWin ? { increment: 1 } : undefined,
-                      totalProfit: { increment: isWin ? payout - bet.amount : -bet.amount },
-                    },
-                  });
+                  userAggregates.set(bet.userId, agg);
                 } else {
                   console.log(`[GameEngine] Bet ${bet.id} already settled, skipping`);
+                }
+              }
+
+              // 第二阶段：批量更新用户余额和统计（每用户仅1次查询+1次更新）
+              for (const [userId, agg] of userAggregates) {
+                const user = await tx.user.findUnique({
+                  where: { id: userId },
+                  select: { balance: true, playBalance: true },
+                });
+
+                if (!user) continue;
+
+                const updateData: any = {
+                  totalBets: { increment: agg.totalBets },
+                  totalWins: agg.totalWins > 0 ? { increment: agg.totalWins } : undefined,
+                  totalLosses: agg.totalLosses > 0 ? { increment: agg.totalLosses } : undefined,
+                  totalProfit: { increment: agg.totalProfit },
+                };
+
+                if (agg.totalPayout > 0) updateData.balance = { increment: agg.totalPayout };
+                if (agg.totalPayoutPlay > 0) updateData.playBalance = { increment: agg.totalPayoutPlay };
+
+                await tx.user.update({ where: { id: userId }, data: updateData });
+
+                // 批量创建流水记录
+                if (agg.transactions.length > 0) {
+                  let currentBalance = Number(user.balance);
+                  await tx.transaction.createMany({
+                    data: agg.transactions.map(t => {
+                      const balanceBefore = currentBalance;
+                      currentBalance += t.amount;
+                      return {
+                        userId,
+                        type: 'WIN' as const,
+                        amount: t.amount,
+                        balanceBefore,
+                        balanceAfter: currentBalance,
+                        relatedBetId: t.relatedBetId,
+                        remark: t.remark,
+                        status: 'COMPLETED' as const,
+                        completedAt: new Date(),
+                      };
+                    }),
+                  });
                 }
               }
             });
@@ -1009,12 +1084,14 @@ export class GameEngine extends EventEmitter {
 
             // 广播结算结果
             for (const { bet, isWin, hitDetails } of batch) {
+              // 确保 multiplier 舍入一致性
+              const roundedMultiplier = Math.round(bet.multiplier * 10000) / 10000;
               this.emit('bet:settled', {
                 betId: bet.id,
                 orderId: bet.orderId,
                 userId: bet.userId,
                 isWin,
-                payout: isWin ? bet.amount * bet.multiplier : 0,
+                payout: isWin ? roundMoney(bet.amount * roundedMultiplier) : 0,
                 hitDetails,
               });
             }
@@ -1184,7 +1261,6 @@ export class GameEngine extends EventEmitter {
       startPrice: this.state.startPrice.toString(),
       currentRow: this.state.currentRow.toString(),
       elapsed: this.state.elapsed.toString(),
-      commitHash: this.state.commitHash,
     });
   }
 
@@ -1223,9 +1299,67 @@ export class GameEngine extends EventEmitter {
    */
   private cleanup(): void {
     this.state = null;
-    this.serverSeed = null;
     this.priceSnapshotBuffer = [];
     this.settlementQueue = [];
+    this.betHeap = [];
+  }
+
+  // ========== 最小堆操作 ==========
+
+  /**
+   * 插入投注到最小堆（按 targetTime 排序）
+   */
+  private heapPush(bet: ServerBet): void {
+    this.betHeap.push(bet);
+    this.heapifyUp(this.betHeap.length - 1);
+  }
+
+  /**
+   * 弹出堆顶投注
+   */
+  private heapPop(): ServerBet | undefined {
+    if (this.betHeap.length === 0) return undefined;
+    if (this.betHeap.length === 1) return this.betHeap.pop();
+
+    const top = this.betHeap[0];
+    this.betHeap[0] = this.betHeap.pop()!;
+    this.heapifyDown(0);
+    return top;
+  }
+
+  /**
+   * 上浮操作
+   */
+  private heapifyUp(idx: number): void {
+    while (idx > 0) {
+      const parent = Math.floor((idx - 1) / 2);
+      if (this.betHeap[idx].targetTime >= this.betHeap[parent].targetTime) break;
+      [this.betHeap[idx], this.betHeap[parent]] = [this.betHeap[parent], this.betHeap[idx]];
+      idx = parent;
+    }
+  }
+
+  /**
+   * 下沉操作
+   */
+  private heapifyDown(idx: number): void {
+    const len = this.betHeap.length;
+    while (true) {
+      let smallest = idx;
+      const left = 2 * idx + 1;
+      const right = 2 * idx + 2;
+
+      if (left < len && this.betHeap[left].targetTime < this.betHeap[smallest].targetTime) {
+        smallest = left;
+      }
+      if (right < len && this.betHeap[right].targetTime < this.betHeap[smallest].targetTime) {
+        smallest = right;
+      }
+      if (smallest === idx) break;
+
+      [this.betHeap[idx], this.betHeap[smallest]] = [this.betHeap[smallest], this.betHeap[idx]];
+      idx = smallest;
+    }
   }
 
   /**

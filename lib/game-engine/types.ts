@@ -34,7 +34,6 @@ export interface GameState {
   prevRow?: number;           // 上一帧行索引（用于交叉检测）
   elapsed: number;            // 已过秒数
   roundStartTime: number;     // 回合开始时间戳（ms）
-  commitHash: string;
   activeBets: Map<string, ServerBet>;
 }
 
@@ -122,7 +121,6 @@ export interface RoundStartMessage extends WSMessage {
   payload: {
     roundId: string;
     asset: string;
-    commitHash: string;
     startPrice: number;
     startTime: number;
     bettingDuration: number;
@@ -134,7 +132,6 @@ export interface RoundEndMessage extends WSMessage {
   type: 'round_end';
   payload: {
     roundId: string;
-    serverSeed: string;
     endPrice: number;
     reason: 'timeout' | 'manual' | 'crash';
     stats: {
@@ -203,7 +200,6 @@ export interface GameEngineEvents {
   'round:end': RoundEndMessage['payload'];
   'round:cancelled': {
     roundId: string;
-    serverSeed: string;
     reason: string;
     refundedBets: number;
   };

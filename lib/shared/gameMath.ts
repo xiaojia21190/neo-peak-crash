@@ -31,15 +31,15 @@ export function calculateMultiplier(
 
   const sigma = 3.5;
   const baseProbability = 0.92;
-  const probability = baseProbability * Math.exp(-(distance * distance) / (2 * sigma * sigma));
+
+  // Apply time bonus to probability calculation to maintain house edge
+  const timeBonus = 1 + Math.max(0, timeDeltaSeconds) * 0.04;
+  const adjustedProbability = (baseProbability * Math.exp(-(distance * distance) / (2 * sigma * sigma))) / timeBonus;
 
   // Avoid Infinity in pathological cases.
-  const fairPayout = probability > 0 ? 1 / probability : MAX_MULTIPLIER;
+  const fairPayout = adjustedProbability > 0 ? 1 / adjustedProbability : MAX_MULTIPLIER;
   const housePayout = fairPayout * (1 - HOUSE_EDGE);
 
-  const timeBonus = 1 + Math.max(0, timeDeltaSeconds) * 0.04;
-  const raw = housePayout * timeBonus;
-
-  const clamped = Math.max(MIN_MULTIPLIER, Math.min(MAX_MULTIPLIER, raw));
+  const clamped = Math.max(MIN_MULTIPLIER, Math.min(MAX_MULTIPLIER, housePayout));
   return Math.round(clamped * 10000) / 10000;
 }

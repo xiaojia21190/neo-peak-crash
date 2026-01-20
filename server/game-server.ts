@@ -306,16 +306,14 @@ async function main() {
     const ttl = await redis.pttl(lockKey);
     console.warn('[Init] ⚠️  Detected existing round lock');
 
-    if (ttl > 60000) {
-      console.warn(`[Init] Lock TTL: ${Math.round(ttl/1000)}s - Force clearing stale lock`);
-      await redis.del(lockKey);
-    } else if (ttl > 0) {
+    if (ttl > 0) {
       console.warn(`[Init] Lock TTL: ${Math.round(ttl/1000)}s - Waiting for expiration...`);
       await new Promise(resolve => setTimeout(resolve, ttl + 1000));
-    } else {
-      console.warn('[Init] Lock has no TTL - Force clearing');
-      await redis.del(lockKey);
+    } else if (ttl === -1) {
+      console.error('[Init] Lock exists without TTL - another instance may be running. Exiting to prevent conflicts.');
+      process.exit(1);
     }
+    // If ttl === -2, lock doesn't exist (race condition), continue
   }
 
   gameEngine.startAutoRound();

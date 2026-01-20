@@ -47,13 +47,8 @@ model User {
 // 游戏回合模型
 model Round {
   id     String      @id @default(cuid())
-  asset  String      // 交易对 (BTCUSDT, ETHUSDT)
+  asset  String // 交易对 (BTCUSDT, ETHUSDT)
   status RoundStatus @default(PENDING)
-
-  // Provably Fair
-  serverSeed String? // 服务端种子（回合结束后公开）
-  commitHash String  // SHA256(serverSeed) - 回合开始时公开
-  clientSeed String? // 可选客户端种子
 
   // 价格数据
   startPrice Decimal  @db.Decimal(18, 8)
@@ -126,7 +121,6 @@ model Bet {
 
   // 游戏信息
   asset      String // 交易对 (如 BTCUSDT)
-  roundHash  String? // 回合哈希（兼容旧字段）
   isPlayMode Boolean @default(false) // 是否为游戏模式
 
   // 时间戳
@@ -177,10 +171,10 @@ model Transaction {
 enum TransactionType {
   RECHARGE // 充值
   WITHDRAW // 提现
-  BET      // 下注扣款
-  WIN      // 赢钱加款
-  REFUND   // 退款
-  BET_WIN  // 投注赢（已废弃）
+  BET // 下注扣款
+  WIN // 赢钱加款
+  REFUND // 退款
+  BET_WIN // 投注赢（已废弃）
   BET_LOSE // 投注输（已废弃）
 }
 
@@ -193,20 +187,20 @@ enum TransactionStatus {
 
 // 回合状态
 enum RoundStatus {
-  PENDING   // 准备中
-  BETTING   // 投注阶段
-  RUNNING   // 运行中
-  SETTLING  // 结算中
+  PENDING // 准备中
+  BETTING // 投注阶段
+  RUNNING // 运行中
+  SETTLING // 结算中
   COMPLETED // 已完成
   CANCELLED // 已取消
 }
 
 // 投注状态
 enum BetStatus {
-  PENDING   // 待结算
-  SETTLING  // 结算中（内存状态，防止重复入队）
-  WON       // 已赢
-  LOST      // 已输
+  PENDING // 待结算
+  SETTLING // 结算中（内存状态，防止重复入队）
+  WON // 已赢
+  LOST // 已输
   CANCELLED // 已取消（回合取消时）
-  REFUNDED  // 已退款
+  REFUNDED // 已退款
 }
