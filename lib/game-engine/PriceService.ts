@@ -195,8 +195,11 @@ export class PriceService extends EventEmitter {
 
   private async cachePrice(price: PriceUpdate): Promise<void> {
     const key = `${REDIS_KEYS.PRICE_STREAM}${price.asset}`;
-    await this.redis.lpush(key, JSON.stringify(price));
-    await this.redis.ltrim(key, 0, 999); // 保留最近 1000 条
+    // Use pipeline to batch lpush and ltrim into single network round-trip
+    await this.redis.pipeline()
+      .lpush(key, JSON.stringify(price))
+      .ltrim(key, 0, 999)
+      .exec();
   }
 
   private normalizeMessageData(data: RawData | string): string {

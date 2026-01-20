@@ -9,9 +9,8 @@
 ## ✨ 特性
 
 ### 🎮 游戏功能
-- 实时加密货币价格数据（Bybit V5 WebSocket）
+- 实时 Bitcoin (BTC) 价格数据（Bybit V5 WebSocket）
 - 高性能 60 FPS 图表渲染（D3.js）
-- 多种加密货币支持（BTC、ETH、SOL、XRP、DOGE）
 - 沉浸式音效和背景音乐
 
 ### 🔐 用户系统
@@ -109,7 +108,6 @@ pnpm dev
 | `LDC_CLIENT_ID`         | ✅    | Linux DO Credit Client ID         |
 | `LDC_CLIENT_SECRET`     | ✅    | Linux DO Credit Client Secret     |
 | `LDC_GATEWAY`           | ❌    | 支付网关地址（默认官方地址）      |
-| `GEMINI_API_KEY`        | ❌    | Gemini AI API Key（用于 AI 评论） |
 
 ## 🛠️ 技术栈
 

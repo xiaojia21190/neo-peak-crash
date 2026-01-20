@@ -8,7 +8,7 @@ export default function LoginPage() {
   const callbackUrl = searchParams.get("callbackUrl") || "/";
 
   const handleLogin = () => {
-    signIn("discourse", { callbackUrl });
+    signIn("linux-do", { callbackUrl });
   };
 
   return (

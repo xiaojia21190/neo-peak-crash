@@ -3,6 +3,10 @@
  */
 
 import prisma from "@/lib/prisma";
+import { FinancialService } from "./financial";
+
+// 创建财务服务单例
+const financialService = new FinancialService(prisma);
 
 export interface UserData {
   id: string;
@@ -91,6 +95,9 @@ export async function getUserBalance(userId: string): Promise<{
 
 /**
  * 原子性余额变动操作，自动记录流水
+ *
+ * 现已委托给 FinancialService 处理，这里保留为兼容层
+ * 新代码应直接使用 FinancialService
  */
 export async function updateUserBalanceWithLedger(params: {
   userId: string;
@@ -101,50 +108,22 @@ export async function updateUserBalanceWithLedger(params: {
   orderNo?: string;
   tradeNo?: string;
 }): Promise<{ balanceBefore: number; balanceAfter: number }> {
-  const { userId, amount, type, relatedBetId, remark, orderNo, tradeNo } = params;
-
-  return await prisma.$transaction(async (tx) => {
-    const user = await tx.user.findUnique({
-      where: { id: userId },
-      select: { balance: true },
-    });
-
-    if (!user) {
-      throw new Error(`User ${userId} not found`);
-    }
-
-    const balanceBefore = Number(user.balance);
-
-    await tx.user.update({
-      where: { id: userId },
-      data: { balance: { increment: amount } },
-    });
-
-    const updatedUser = await tx.user.findUnique({
-      where: { id: userId },
-      select: { balance: true },
-    });
-
-    const balanceAfter = Number(updatedUser!.balance);
-
-    await tx.transaction.create({
-      data: {
-        userId,
-        type,
-        amount,
-        balanceBefore,
-        balanceAfter,
-        relatedBetId,
-        remark,
-        orderNo,
-        tradeNo,
-        status: "COMPLETED",
-        completedAt: new Date(),
-      },
-    });
-
-    return { balanceBefore, balanceAfter };
+  // 委托给 FinancialService 处理
+  const result = await financialService.changeBalance({
+    userId: params.userId,
+    amount: params.amount,
+    type: params.type,
+    isPlayMode: false, // 此函数只处理真实余额
+    relatedBetId: params.relatedBetId,
+    remark: params.remark,
+    orderNo: params.orderNo,
+    tradeNo: params.tradeNo,
   });
+
+  return {
+    balanceBefore: result.balanceBefore,
+    balanceAfter: result.balanceAfter,
+  };
 }
 
 /**

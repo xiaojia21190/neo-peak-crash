@@ -197,11 +197,20 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
 
     // --- INTERNAL ANIMATION LOOP ---
     let animationFrameId: number;
+    // Performance optimization: Index active bets for O(1) lookup
+    const betIndexRef = useRef<Map<string, GridBet>>(new Map());
 
     const renderLoop = () => {
       const engine = gameEngineRef.current;
       const { candles, status, activeBets } = engine;
       const currentTime = engine.currentTime;
+
+      // Rebuild bet index only when bets change (O(n) once per frame instead of O(n*m))
+      betIndexRef.current.clear();
+      activeBets.forEach((bet) => {
+        const key = `${bet.timePoint}-${bet.rowIndex}`;
+        betIndexRef.current.set(key, bet);
+      });
 
       // Clear UI text
       uiLayer.selectAll("*").remove();
@@ -314,7 +323,8 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
           // Calculate multiplier relative to SMOOTHED head position (gridReferenceY)
           const m = calculateMultiplier(rowIdx, gridReferenceY, Math.max(0, dist));
 
-          const activeBet = activeBets.find((b) => b.rowIndex === rowIdx && Math.abs(b.timePoint - t) < 0.1);
+          // O(1) lookup instead of O(n) find
+          const activeBet = betIndexRef.current.get(`${t}-${rowIdx}`);
 
           // Active bets always visible
           const finalOpacity = activeBet ? 1 : opacity;
@@ -516,43 +526,76 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
           .attr("opacity", 1 - progress);
       });
 
-      // Bets Overlay (Badges)
-      betsLayer.selectAll("*").remove();
-      activeBets.forEach((bet) => {
-        const bx = xScale(bet.timePoint);
-        const by = yScale(bet.rowIndex);
-        if (bx < -100 || bx > width + 100 || by < -50 || by > height + 50) return;
-        const g = betsLayer.append("g").attr("transform", `translate(${bx}, ${by})`);
-        if (bet.isTriggered) {
+      // Bets Overlay (Badges) - Incremental updates instead of full clear
+      const visibleBets = activeBets
+        .map((bet) => ({
+          ...bet,
+          x: xScale(bet.timePoint),
+          y: yScale(bet.rowIndex),
+        }))
+        .filter((bet) => bet.x >= -100 && bet.x <= width + 100 && bet.y >= -50 && bet.y <= height + 50);
+
+      const betGroups = betsLayer
+        .selectAll<SVGGElement, typeof visibleBets[0]>(".bet-badge")
+        .data(visibleBets, (d) => `${d.timePoint}-${d.rowIndex}`);
+
+      // Remove bets that are no longer visible
+      betGroups.exit().remove();
+
+      // Add new bets
+      const betEnter = betGroups.enter().append("g").attr("class", "bet-badge");
+
+      // Create badge structure for new bets
+      betEnter.append("rect").attr("class", "bet-glow");
+      const badge = betEnter.append("g").attr("class", "bet-label").attr("transform", `translate(0, ${-cellSize / 2}) scale(0.8)`);
+      badge
+        .append("rect")
+        .attr("class", "bet-bg")
+        .attr("x", -15)
+        .attr("y", -10)
+        .attr("width", 30)
+        .attr("height", 14)
+        .attr("rx", 2)
+        .attr("stroke-width", 1);
+      badge
+        .append("text")
+        .attr("class", "bet-text")
+        .attr("text-anchor", "middle")
+        .attr("y", 0)
+        .attr("font-weight", "bold")
+        .attr("font-size", "9px")
+        .attr("alignment-baseline", "middle");
+
+      // Update all bets (existing + new)
+      const betUpdate = betGroups.merge(betEnter);
+      betUpdate.attr("transform", (d) => `translate(${d.x}, ${d.y})`);
+
+      // Update glow effect
+      betUpdate
+        .select(".bet-glow")
+        .attr("x", -colWidth / 2)
+        .attr("y", -cellSize / 2)
+        .attr("width", colWidth)
+        .attr("height", cellSize)
+        .attr("fill", (d) => (d.isTriggered ? "url(#success-glow)" : "none"))
+        .attr("opacity", (d) => {
+          if (!d.isTriggered) return 0;
           const pulse = Math.abs(Math.sin(Date.now() / 150));
-          g.append("rect")
-            .attr("x", -colWidth / 2)
-            .attr("y", -cellSize / 2)
-            .attr("width", colWidth)
-            .attr("height", cellSize)
-            .attr("fill", "url(#success-glow)")
-            .attr("opacity", 0.5 + pulse * 0.5);
-        }
-        const b = g.append("g").attr("transform", `translate(0, ${-cellSize / 2}) scale(0.8)`);
-        b.append("rect")
-          .attr("x", -15)
-          .attr("y", -10)
-          .attr("width", 30)
-          .attr("height", 14)
-          .attr("rx", 2)
-          .attr("fill", bet.isLost ? "#1e293b" : bet.isTriggered ? "#10b981" : "#6366f1")
-          .attr("stroke", bet.isLost ? "#475569" : "#fff")
-          .attr("stroke-width", 1);
-        b.append("text")
-          .attr("text-anchor", "middle")
-          .attr("y", 0)
-          .attr("fill", bet.isLost ? "#94a3b8" : "#fff")
-          .attr("font-weight", "bold")
-          .attr("font-size", "9px")
-          .attr("alignment-baseline", "middle")
-          .text(`$${bet.amount}`)
-          .style("text-decoration", bet.isLost ? "line-through" : "none");
-      });
+          return 0.5 + pulse * 0.5;
+        });
+
+      // Update badge background
+      betUpdate
+        .select(".bet-bg")
+        .attr("fill", (d) => (d.isLost ? "#1e293b" : d.isTriggered ? "#10b981" : "#6366f1"))
+        .attr("stroke", (d) => (d.isLost ? "#475569" : "#fff"));
+
+      // Update badge text
+      betUpdate
+        .select(".bet-text")
+        .attr("fill", (d) => (d.isLost ? "#94a3b8" : "#fff"))
+        .style("text-decoration", (d) => (d.isLost ? "line-through" : "none"))
+        .text((d) => `$${d.amount}`);
 
       // K-Line
       const isCrashed = status === GameStatus.CRASHED;

@@ -16,7 +16,10 @@
     "game:server": "tsx server/game-server.ts",
     "game:server:watch": "tsx watch server/game-server.ts",
     "dev:all": "concurrently \"pnpm dev\" \"pnpm game:server\"",
-    "test:rateLimit": "node --test --experimental-test-coverage --import tsx tests/rateLimit.test.ts"
+    "test": "node --test --experimental-test-coverage --import tsx tests/*.test.ts",
+    "test:rateLimit": "node --test --experimental-test-coverage --import tsx tests/rateLimit.test.ts",
+    "test:priceSnapshots": "node --test --experimental-test-coverage --import tsx tests/priceSnapshots.test.ts",
+    "test:payoutConsistency": "node --test --experimental-test-coverage --import tsx tests/payoutConsistency.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.34.0",

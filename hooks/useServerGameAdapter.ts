@@ -62,6 +62,10 @@ interface UseServerGameAdapterReturn {
 
   // 历史
   history: number[];
+
+  // Provably Fair
+  roundHash: string;
+  serverSeed: string | null;
 }
 
 // 将服务端 bet 状态映射到客户端 GridBet
@@ -305,5 +309,9 @@ export function useServerGameAdapter({
 
     // 历史
     history: historyRef.current,
+
+    // Provably Fair
+    roundHash: roundId || '',
+    serverSeed: null, // TODO: Add serverSeed to ClientGameState when available from server
   };
 }

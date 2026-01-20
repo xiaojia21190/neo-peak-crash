@@ -37,6 +37,7 @@ import { GameError } from './errors';
 import { PriceService } from './PriceService';
 import { allowSlidingWindowRequest, buildRateLimitKey } from '../services/rateLimit';
 import { DistributedLock } from './DistributedLock';
+import { FinancialService } from '../services/financial';
 
 export class GameEngine extends EventEmitter {
   private config: RoundConfig;
@@ -50,13 +51,14 @@ export class GameEngine extends EventEmitter {
   // 投注时间索引（最小堆：按 targetTime 排序）
   private betHeap: ServerBet[] = [];
 
-  // 价格快照缓冲
+  // 价格快照缓冲 (ring buffer: O(1) shift via head index)
   private priceSnapshotBuffer: Array<{
     roundId: string;
     timestamp: Date;
     price: number;
     rowIndex: number;
   }> = [];
+  private priceSnapshotBufferHead = 0;
   private lastSnapshotFlush = 0;
   private snapshotFlushPromise: Promise<void> | null = null;
   private snapshotFlushBackoffUntil = 0;
@@ -72,6 +74,9 @@ export class GameEngine extends EventEmitter {
   private distributedLock: DistributedLock;
   private roundLockToken: string | null = null;
 
+  // 财务服务（单一职责：所有余额变动）
+  private financialService: FinancialService;
+
   constructor(
     private redis: Redis,
     private prisma: PrismaClient,
@@ -81,6 +86,7 @@ export class GameEngine extends EventEmitter {
     super();
     this.config = { ...DEFAULT_ROUND_CONFIG, ...config };
     this.distributedLock = new DistributedLock(redis);
+    this.financialService = new FinancialService(prisma);
 
     // 监听价格更新
     this.priceService.on('price', (price: PriceUpdate) => {
@@ -455,6 +461,7 @@ export class GameEngine extends EventEmitter {
 
   /**
    * 退款单个投注
+   * 使用 FinancialService 统一处理余额变动和流水记录
    */
   private async refundBet(bet: ServerBet, reason: string): Promise<void> {
     const settledAt = new Date();
@@ -472,43 +479,18 @@ export class GameEngine extends EventEmitter {
 
       if (updated.count !== 1) return false;
 
-      // 退还余额
-      const balanceField = bet.isPlayMode ? 'playBalance' : 'balance';
-
-      const user = await tx.user.findUnique({
-        where: { id: bet.userId },
-        select: { balance: true, playBalance: true },
-      });
-
-      if (!user) {
-        throw new Error(`User ${bet.userId} not found`);
-      }
-
-      const balanceBefore = Number(balanceField === 'balance' ? user.balance : user.playBalance);
-
-      await tx.user.update({
-        where: { id: bet.userId },
-        data: { [balanceField]: { increment: bet.amount } },
-      });
-
-      const balanceAfter = balanceBefore + bet.amount;
-
-      // 记录 REFUND 流水（仅真实余额）
-      if (!bet.isPlayMode) {
-        await tx.transaction.create({
-          data: {
-            userId: bet.userId,
-            type: 'REFUND',
-            amount: bet.amount,
-            balanceBefore,
-            balanceAfter,
-            relatedBetId: bet.id,
-            remark: `Refund bet ${bet.id}${roundId ? ` (round ${roundId})` : ''}: ${reason}`,
-            status: 'COMPLETED',
-            completedAt: settledAt,
-          },
-        });
-      }
+      // 使用 FinancialService 处理退款（自动记录流水）
+      await this.financialService.changeBalance(
+        {
+          userId: bet.userId,
+          amount: bet.amount,
+          type: 'REFUND',
+          isPlayMode: bet.isPlayMode,
+          relatedBetId: bet.id,
+          remark: `Refund bet ${bet.id}${roundId ? ` (round ${roundId})` : ''}: ${reason}`,
+        },
+        tx
+      );
 
       return true;
     });
@@ -657,38 +639,30 @@ export class GameEngine extends EventEmitter {
           throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '匿名用户只能使用游玩模式');
         }
 
-        let currentBalance = 0;
+        let balanceBefore = 0;
+        let balanceAfter = 0;
 
-        // 非匿名用户需要扣款
+        // 非匿名用户需要扣款（使用 FinancialService）
         if (!isAnonymous) {
-          const balanceField = request.isPlayMode ? 'playBalance' : 'balance';
+          const result = await this.financialService.conditionalChangeBalance(
+            {
+              userId,
+              amount: -request.amount,
+              type: 'BET',
+              isPlayMode: request.isPlayMode,
+              minBalance: request.amount,
+              relatedBetId: '', // Will update after bet creation
+              remark: `投注 ${this.config.asset} 回合 ${this.state!.roundId}`,
+            },
+            tx
+          );
 
-          // 获取当前余额（用于流水记录）
-          const user = await tx.user.findUnique({
-            where: { id: userId },
-            select: { balance: true, playBalance: true },
-          });
-
-          if (!user) {
-            throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '用户不存在');
+          if (!result.success) {
+            throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, result.error || '余额不足');
           }
 
-          currentBalance = Number(balanceField === 'balance' ? user.balance : user.playBalance);
-
-          // 原子条件更新
-          const updateResult = await tx.user.updateMany({
-            where: {
-              id: userId,
-              [balanceField]: { gte: request.amount },
-            },
-            data: {
-              [balanceField]: { decrement: request.amount },
-            },
-          });
-
-          if (updateResult.count === 0) {
-            throw new GameError(ERROR_CODES.INSUFFICIENT_BALANCE, '余额不足');
-          }
+          balanceBefore = result.result!.balanceBefore;
+          balanceAfter = result.result!.balanceAfter;
         }
 
         // 创建投注记录（包含orderId）
@@ -708,23 +682,6 @@ export class GameEngine extends EventEmitter {
             status: 'PENDING',
           },
         });
-
-        // 记录流水（仅真实余额且非匿名）
-        if (!request.isPlayMode && !isAnonymous) {
-          await tx.transaction.create({
-            data: {
-              userId,
-              type: 'BET',
-              amount: -request.amount,
-              balanceBefore: currentBalance,
-              balanceAfter: currentBalance - request.amount,
-              relatedBetId: newBet.id,
-              remark: `投注 ${this.config.asset} 回合 ${this.state!.roundId}`,
-              status: 'COMPLETED',
-              completedAt: new Date(),
-            },
-          });
-        }
 
         return newBet;
       });
@@ -954,6 +911,7 @@ export class GameEngine extends EventEmitter {
 
   /**
    * 异步结算队列处理
+   * 使用 FinancialService 批量处理用户余额变动，提高性能
    */
   private async processSettlementQueue(): Promise<void> {
     if (this.isSettling || this.settlementQueue.length === 0) return;
@@ -978,7 +936,7 @@ export class GameEngine extends EventEmitter {
                 totalWins: number,
                 totalLosses: number,
                 totalProfit: number,
-                transactions: Array<{ amount: number, relatedBetId: string, remark: string }>,
+                balanceChanges: Array<{ amount: number, type: 'WIN', relatedBetId: string, remark: string }>,
               }>();
 
               // 第一阶段：更新投注状态并聚合用户数据
@@ -1009,7 +967,7 @@ export class GameEngine extends EventEmitter {
                     totalWins: 0,
                     totalLosses: 0,
                     totalProfit: 0,
-                    transactions: [],
+                    balanceChanges: [],
                   };
 
                   agg.bets.push({ bet, isWin, hitDetails, payout });
@@ -1018,7 +976,13 @@ export class GameEngine extends EventEmitter {
                       agg.totalPayoutPlay += payout;
                     } else {
                       agg.totalPayout += payout;
-                      agg.transactions.push({ amount: payout, relatedBetId: bet.id, remark: `赢得投注 ${bet.id}` });
+                      // 收集真实余额的赢钱变动
+                      agg.balanceChanges.push({
+                        amount: payout,
+                        type: 'WIN',
+                        relatedBetId: bet.id,
+                        remark: `赢得投注 ${bet.id}`,
+                      });
                     }
                   }
                   agg.totalBets++;
@@ -1032,15 +996,9 @@ export class GameEngine extends EventEmitter {
                 }
               }
 
-              // 第二阶段：批量更新用户余额和统计（每用户仅1次查询+1次更新）
+              // 第二阶段：批量更新用户余额和统计（使用 FinancialService）
               for (const [userId, agg] of userAggregates) {
-                const user = await tx.user.findUnique({
-                  where: { id: userId },
-                  select: { balance: true, playBalance: true },
-                });
-
-                if (!user) continue;
-
+                // 更新统计字段
                 const updateData: any = {
                   totalBets: { increment: agg.totalBets },
                   totalWins: agg.totalWins > 0 ? { increment: agg.totalWins } : undefined,
@@ -1048,32 +1006,27 @@ export class GameEngine extends EventEmitter {
                   totalProfit: { increment: agg.totalProfit },
                 };
 
-                if (agg.totalPayout > 0) updateData.balance = { increment: agg.totalPayout };
-                if (agg.totalPayoutPlay > 0) updateData.playBalance = { increment: agg.totalPayoutPlay };
+                // 更新真实余额（使用 FinancialService 批量处理）
+                if (agg.balanceChanges.length > 0) {
+                  await this.financialService.batchChangeBalance(
+                    {
+                      userId,
+                      changes: agg.balanceChanges,
+                      isPlayMode: false,
+                    },
+                    tx
+                  );
+                  // FinancialService 已处理 balance 更新，从 updateData 移除
+                } else if (agg.totalPayout > 0) {
+                  updateData.balance = { increment: agg.totalPayout };
+                }
+
+                // 更新游戏余额
+                if (agg.totalPayoutPlay > 0) {
+                  updateData.playBalance = { increment: agg.totalPayoutPlay };
+                }
 
                 await tx.user.update({ where: { id: userId }, data: updateData });
-
-                // 批量创建流水记录
-                if (agg.transactions.length > 0) {
-                  let currentBalance = Number(user.balance);
-                  await tx.transaction.createMany({
-                    data: agg.transactions.map(t => {
-                      const balanceBefore = currentBalance;
-                      currentBalance += t.amount;
-                      return {
-                        userId,
-                        type: 'WIN' as const,
-                        amount: t.amount,
-                        balanceBefore,
-                        balanceAfter: currentBalance,
-                        relatedBetId: t.relatedBetId,
-                        remark: t.remark,
-                        status: 'COMPLETED' as const,
-                        completedAt: new Date(),
-                      };
-                    }),
-                  });
-                }
               }
             });
 
@@ -1149,7 +1102,8 @@ export class GameEngine extends EventEmitter {
 
     // 每 100ms 记录一次
     const snapshotIndex = Math.floor(this.state.elapsed * 10);
-    if (this.priceSnapshotBuffer.length > 0) {
+    const bufferSize = this.priceSnapshotBuffer.length - this.priceSnapshotBufferHead;
+    if (bufferSize > 0) {
       const lastIndex = Math.floor(
         (this.priceSnapshotBuffer[this.priceSnapshotBuffer.length - 1].timestamp.getTime() -
           this.state.roundStartTime) /
@@ -1158,10 +1112,10 @@ export class GameEngine extends EventEmitter {
       if (snapshotIndex === lastIndex) return;
     }
 
-    // 队列限制：防止内存溢出
+    // 队列限制：防止内存溢出 (O(1) shift via head increment)
     const maxQueue = parseInt(process.env.MAX_SNAPSHOT_QUEUE ?? '10000', 10);
-    if (this.priceSnapshotBuffer.length >= maxQueue) {
-      this.priceSnapshotBuffer.shift();
+    if (bufferSize >= maxQueue) {
+      this.priceSnapshotBufferHead++;
     }
 
     this.priceSnapshotBuffer.push({
@@ -1176,7 +1130,7 @@ export class GameEngine extends EventEmitter {
     if (
       now - this.lastSnapshotFlush >= 1000 &&
       now >= this.snapshotFlushBackoffUntil &&
-      this.priceSnapshotBuffer.length > 0
+      bufferSize > 0
     ) {
       void this.flushPriceSnapshots().catch(console.error);
     }
@@ -1187,7 +1141,8 @@ export class GameEngine extends EventEmitter {
    */
   private flushPriceSnapshots(): Promise<void> {
     if (this.snapshotFlushPromise) return this.snapshotFlushPromise;
-    if (this.priceSnapshotBuffer.length === 0) return Promise.resolve();
+    const bufferSize = this.priceSnapshotBuffer.length - this.priceSnapshotBufferHead;
+    if (bufferSize === 0) return Promise.resolve();
 
     const now = Date.now();
     if (now < this.snapshotFlushBackoffUntil) return Promise.resolve();
@@ -1202,7 +1157,9 @@ export class GameEngine extends EventEmitter {
   }
 
   private async flushPriceSnapshotsInternal(): Promise<void> {
-    const buffer = this.priceSnapshotBuffer.splice(0);
+    const buffer = this.priceSnapshotBuffer.slice(this.priceSnapshotBufferHead);
+    this.priceSnapshotBuffer = [];
+    this.priceSnapshotBufferHead = 0;
     if (buffer.length === 0) return;
 
     const rawBatchSize = parseInt(process.env.SNAPSHOT_FLUSH_BATCH_SIZE ?? '500', 10);
@@ -1300,6 +1257,7 @@ export class GameEngine extends EventEmitter {
   private cleanup(): void {
     this.state = null;
     this.priceSnapshotBuffer = [];
+    this.priceSnapshotBufferHead = 0;
     this.settlementQueue = [];
     this.betHeap = [];
   }
