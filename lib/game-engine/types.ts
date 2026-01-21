@@ -115,6 +115,20 @@ export interface PlaceBetMessage extends WSMessage {
   payload: PlaceBetRequest;
 }
 
+export interface StateRequestMessage extends WSMessage {
+  type: 'state_request';
+  payload?: {
+    /**
+     * 是否包含用户历史下注（默认 true）
+     */
+    includeHistory?: boolean;
+    /**
+     * 返回的历史下注数量（默认 20）
+     */
+    historyLimit?: number;
+  };
+}
+
 // 服务端 -> 客户端
 export interface RoundStartMessage extends WSMessage {
   type: 'round_start';
@@ -189,6 +203,54 @@ export interface ErrorMessage extends WSMessage {
   payload: {
     code: string;
     message: string;
+  };
+}
+
+export interface GameStateSnapshot {
+  roundId: string | null;
+  status: RoundStatus | null;
+  asset: string;
+  startPrice: number;
+  currentPrice: number;
+  currentRow: number;
+  elapsed: number;
+  startTime: number;
+  bettingDuration: number;
+  maxDuration: number;
+}
+
+export interface BetSnapshot {
+  betId: string;
+  orderId: string | null;
+  roundId: string | null;
+  amount: number;
+  multiplier: number;
+  targetRow: number | null;
+  targetTime: number | null;
+  status: BetStatus;
+  isWin: boolean;
+  payout: number;
+  isPlayMode: boolean;
+  hitDetails?: HitDetails;
+  createdAt: number;
+  settledAt?: number | null;
+}
+
+export interface UserStateSnapshot {
+  balance: number;
+  playBalance: number;
+  recentBets: BetSnapshot[];
+}
+
+export interface StateSnapshotMessage extends WSMessage {
+  type: 'state_snapshot';
+  payload: {
+    serverTime: number;
+    connectionId: string;
+    isAuthenticated: boolean;
+    userId: string | null;
+    game: GameStateSnapshot;
+    user: UserStateSnapshot | null;
   };
 }
 

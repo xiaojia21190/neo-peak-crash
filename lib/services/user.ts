@@ -135,37 +135,34 @@ export async function updateUserBalance(
   amount: number,
   isPlayMode: boolean
 ): Promise<{ balance: number; playBalance: number } | null> {
-  const field = isPlayMode ? "playBalance" : "balance";
+  if (amount < 0) {
+    const result = await financialService.conditionalChangeBalance({
+      userId,
+      amount,
+      type: "BET",
+      isPlayMode,
+    });
 
-  const user = await prisma.user.update({
-    where: { id: userId },
-    data: {
-      [field]: {
-        increment: amount,
-      },
-    },
-    select: { balance: true, playBalance: true },
-  });
+    if (!result.success) return null;
+  } else if (amount > 0) {
+    await financialService.changeBalance({
+      userId,
+      amount,
+      type: "WIN",
+      isPlayMode,
+    });
+  } else {
+    // no-op
+  }
 
-  return {
-    balance: Number(user.balance),
-    playBalance: Number(user.playBalance),
-  };
+  return financialService.getBalance(userId);
 }
 
 /**
  * 重置游戏模式余额
  */
 export async function resetPlayBalance(userId: string): Promise<number> {
-  const user = await prisma.user.update({
-    where: { id: userId },
-    data: {
-      playBalance: 10000,
-    },
-    select: { playBalance: true },
-  });
-
-  return Number(user.playBalance);
+  return financialService.setPlayBalance(userId, 10000);
 }
 
 /**

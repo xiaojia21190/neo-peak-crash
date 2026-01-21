@@ -19,6 +19,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { WebSocketGateway } from '../lib/game-engine/WebSocketGateway';
 import { getRedisClient, closeRedisClient } from '../lib/redis';
+import { FinancialService } from '../lib/services/financial';
 
 // 配置
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -52,6 +53,7 @@ async function main() {
     log: ['warn', 'error'],
   });
   prisma = prismaInstance;
+  const financialService = new FinancialService(prismaInstance);
   await prismaInstance.$connect();
   console.log('[Init] ✓ Database connected');
 
@@ -132,10 +134,20 @@ async function main() {
 
   // 4. 初始化 WebSocket Gateway
   console.log('[Init] Initializing WebSocket Gateway...');
+  const heartbeatIntervalMs = Number.parseInt(process.env.WS_HEARTBEAT_INTERVAL_MS ?? '', 10);
+  const historyLimit = Number.parseInt(process.env.WS_STATE_HISTORY_LIMIT ?? '', 10);
+
   gateway = new WebSocketGateway(httpServer, redis, prisma, {
     cors: {
       origin: CORS_ORIGIN.split(','),
       credentials: true,
+    },
+    heartbeat: {
+      intervalMs: Number.isFinite(heartbeatIntervalMs) && heartbeatIntervalMs > 0 ? heartbeatIntervalMs : undefined,
+    },
+    stateSync: {
+      replayCurrentRoundBets: process.env.WS_REPLAY_CURRENT_ROUND_BETS !== 'false',
+      historyLimit: Number.isFinite(historyLimit) && historyLimit >= 0 ? historyLimit : undefined,
     },
   });
 
@@ -236,47 +248,17 @@ async function main() {
 
               // 只有成功更新1条记录才执行退款
               if (updated.count === 1) {
-                const balanceField = bet.isPlayMode ? 'playBalance' : 'balance';
-
-                // 获取当前余额（用于流水记录）
-                const user = await tx.user.findUnique({
-                  where: { id: bet.userId },
-                  select: { balance: true, playBalance: true },
-                });
-
-                if (!user) {
-                  console.error(`[Init] User ${bet.userId} not found, skipping refund`);
-                  return;
-                }
-
-                const currentBalance = Number(balanceField === 'balance' ? user.balance : user.playBalance);
-
-                // 返还余额
-                await tx.user.update({
-                  where: { id: bet.userId },
-                  data: {
-                    [balanceField]: {
-                      increment: bet.amount,
-                    },
+                await financialService.changeBalance(
+                  {
+                    userId: bet.userId,
+                    amount: Number(bet.amount),
+                    type: 'REFUND',
+                    isPlayMode: bet.isPlayMode,
+                    relatedBetId: bet.id,
+                    remark: `退款投注 ${bet.id}（回合 ${round.id} 已取消）`,
                   },
-                });
-
-                // 记录流水（仅真实余额）
-                if (!bet.isPlayMode) {
-                  await tx.transaction.create({
-                    data: {
-                      userId: bet.userId,
-                      type: 'REFUND',
-                      amount: Number(bet.amount),
-                      balanceBefore: currentBalance,
-                      balanceAfter: currentBalance + Number(bet.amount),
-                      relatedBetId: bet.id,
-                      remark: `退款投注 ${bet.id}（回合 ${round.id} 已取消）`,
-                      status: 'COMPLETED',
-                      completedAt: new Date(),
-                    },
-                  });
-                }
+                  tx
+                );
               } else {
                 console.log(`[Init] Bet ${bet.id} already refunded, skipping`);
               }

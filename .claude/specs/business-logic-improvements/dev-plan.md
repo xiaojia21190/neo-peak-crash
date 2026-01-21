@@ -1,103 +1,137 @@
 # 业务逻辑改进 - 开发计划
 
 ## 概述
-重新设计庄家优势策略（5-8%）、移除可证明公平方案改为市场价格透明展示、完整实现提现功能（API、审核流程、LDC退款集成）。
+修复资金并发一致性、游戏流程完整性、WebSocket 连接策略和客户端状态初始化问题,确保系统在高并发场景下的数据一致性和用户体验。
 
 ## 任务分解
 
-### Task 1: 重新设计庄家优势算法
-- **ID**: task-1
+### Task 1: 修复资金并发一致性
+- **ID**: FIN-001
 - **type**: default
-- **Description**: 重新设计赔率和庄家优势算法，确保在所有游戏场景下庄家优势稳定在5-8%范围内，使用确定性边界计算并通过蒙特卡洛模拟验证
-- **File Scope**:
-  - lib/shared/gameMath.ts
-  - lib/game-engine/utils.ts
-  - app/constants.ts
-  - tests/houseEdge.test.ts
-- **Dependencies**: None
-- **Test Command**: `node --test --experimental-test-coverage tests/houseEdge.test.ts`
-- **Test Focus**:
-  - 验证所有赔率场景下庄家优势在5-8%范围内
-  - 边界测试（最小/最大倍数）
-  - 蒙特卡洛模拟10000+轮次验证长期优势
-  - 极端价格波动场景下的优势稳定性
+- **描述**: 修复读-改-写模式导致的 balanceBefore/After 不可信问题,实现原子性余额更新和可靠的资金流水记录
+- **文件范围**:
+  - lib/services/financial.ts
+  - app/api/payment/notify/route.ts
+  - server/game-server.ts
+  - app/api/user/balance/route.ts
+  - prisma/schema.prisma (如需添加审计字段)
+- **依赖**: 无
+- **测试命令**:
+  ```bash
+  pnpm test --coverage --coverageDirectory=coverage/financial
+  pnpm test:rateLimit
+  ```
+- **测试重点**:
+  - 并发余额更新的原子性(使用 Prisma 原子操作或数据库事务)
+  - balanceBefore/After 字段的准确性验证
+  - 资金流水与 betId 的正确关联
+  - 高并发场景下的数据一致性(100+ 并发请求)
+  - 充值回调的幂等性保证
+  - 余额不足时的正确拒绝
 
-### Task 2: 移除可证明公平并添加价格透明度
-- **ID**: task-2
+### Task 2: 游戏流程/下注/结算一致性加固
+- **ID**: GAME-002
 - **type**: default
-- **Description**: 从游戏引擎、WebSocket、数据库模型中移除所有可证明公平相关字段和逻辑，实现市场价格快照API用于透明展示实时价格数据
-- **File Scope**:
+- **描述**: 完善 Round 状态机,确保 BETTING→RUNNING 状态转换落库,防止并发滑入风险,加固下注和结算逻辑
+- **文件范围**:
   - lib/game-engine/GameEngine.ts
-  - lib/game-engine/types.ts
+  - prisma/schema.prisma (Round 状态字段)
+  - lib/game-engine/types.ts (状态定义)
+- **依赖**: 可独立推进
+- **测试命令**:
+  ```bash
+  pnpm test:payoutConsistency
+  pnpm test:priceSnapshots
+  npx tsx tests/gameEngine.test.ts --coverage
+  ```
+- **测试重点**:
+  - Round 状态转换的完整性(所有状态变更必须落库)
+  - BETTING→RUNNING 转换时的并发安全性
+  - 下注时机验证(只能在 BETTING 阶段下注)
+  - 结算金额计算的准确性(multiplier 应用)
+  - 价格快照的正确记录和使用
+  - 状态回滚机制(异常情况下的恢复)
+
+### Task 3: WebSocket 网关行为与恢复
+- **ID**: WS-003
+- **type**: default
+- **描述**: 统一 WebSocket 匿名连接策略,修复服务端拒绝未认证连接与客户端允许匿名下注的矛盾,完善重连和状态同步机制
+- **文件范围**:
   - lib/game-engine/WebSocketGateway.ts
-  - lib/game-engine/utils.ts
+  - lib/game-engine/types.ts (事件定义)
+  - server/game-server.ts (认证中间件)
+- **依赖**: 与 UI-004 协议需对齐
+- **测试命令**:
+  ```bash
+  pnpm game:server
+  # 手工测试: 匿名连接、认证连接、重连场景
+  ```
+- **测试重点**:
+  - 匿名用户连接策略(允许连接但限制操作)
+  - 认证用户的权限验证
+  - 重连后的状态完整同步(当前 Round、用户余额、历史下注)
+  - 连接断开时的资源清理
+  - 心跳机制的正确实现
+  - 错误事件的正确广播
+
+### Task 4: 客户端状态初始化与下注体验
+- **ID**: UI-004
+- **type**: ui
+- **描述**: 修复中途刷新/重连时 state=null 问题,完善客户端状态初始化逻辑,优化下注交互体验
+- **文件范围**:
   - lib/game-engine/GameClient.ts
   - hooks/useGameEngine.ts
   - hooks/useServerGameAdapter.ts
-  - prisma/schema.prisma
-  - app/api/market/price-snapshots/route.ts
-- **Dependencies**: task-1（依赖新的赔率算法）
-- **Test Command**: `node --test --experimental-test-coverage tests/priceSnapshots.test.ts`
-- **Test Focus**:
-  - 验证所有可证明公平字段已从数据库和API响应中移除
-  - 价格快照API返回正确的市场数据格式
-  - WebSocket消息不包含seed/hash等字段
-  - 价格数据时间戳和来源准确性验证
+  - app/**/page.tsx (游戏页面组件)
+  - components/game/** (游戏 UI 组件)
+- **依赖**: WS-003 (需要服务端提供完整的状态同步)
+- **测试命令**:
+  ```bash
+  pnpm dev
+  # 手工验证: 刷新页面、断网重连、下注流程
+  ```
+- **测试重点**:
+  - 页面刷新后的状态恢复(Round 信息、余额、历史)
+  - 重连后的 UI 状态同步
+  - 下注按钮的禁用/启用逻辑(根据 Round 状态)
+  - 余额实时更新的准确性
+  - 加载状态的友好提示
+  - 错误提示的清晰展示
 
-### Task 3: 实现完整提现功能
-- **ID**: task-3
-- **type**: default
-- **Description**: 实现用户提现API、管理员审核流程、LDC退款集成，包括数据库模型扩展、余额验证、状态机管理和外部支付接口调用
-- **File Scope**:
-  - app/api/payment/withdraw/route.ts
-  - app/api/admin/withdrawals/route.ts
-  - lib/payment/ldc.ts
-  - lib/services/user.ts
-  - prisma/schema.prisma
-  - tests/withdrawalFlow.test.ts
-- **Dependencies**: task-2（依赖schema变更）, task-1（数学逻辑不变）
-- **Test Command**: `node --test --experimental-test-coverage tests/withdrawalFlow.test.ts`
-- **Test Focus**:
-  - 用户提现请求创建（余额充足/不足场景）
-  - 管理员审核流程（批准/拒绝）
-  - LDC退款接口调用成功/失败处理
-  - 并发提现请求的余额锁定机制
-  - 提现状态机完整性（pending→approved→completed/failed）
-  - 错误场景回滚和用户余额一致性
-
-### Task 4: UI更新 - 移除可证明公平UI并添加透明度面板
-- **ID**: task-4
-- **type**: ui
-- **Description**: 从所有前端组件中移除可证明公平相关UI元素，添加市场价格透明度展示面板，实现提现模态框组件
-- **File Scope**:
-  - app/page.tsx
-  - components/GameStats.tsx
-  - components/TutorialModal.tsx
-  - components/UserMenu.tsx
-  - components/RechargeModal.tsx
-  - components/WithdrawModal.tsx
-- **Dependencies**: task-2（依赖API变更）, task-3（依赖提现API）
-- **Test Command**: `node --test --experimental-test-coverage tests/uiSmoke.test.ts`
-- **Test Focus**:
-  - 验证所有可证明公平UI元素已移除（种子输入、验证按钮等）
-  - 市场价格面板正确渲染实时数据
-  - 提现模态框表单验证（金额、最小/最大限制）
-  - 提现流程用户反馈（loading、成功、错误状态）
-  - 无障碍性检查（ARIA标签、键盘导航）
+### Task 5: 快速风险收敛
+- **ID**: QF-005
+- **type**: quick-fix
+- **描述**: 修复 app/api/user/balance/route.ts 中的即时风险点(如缺少认证检查、错误处理不完整等)
+- **文件范围**:
+  - app/api/user/balance/route.ts
+- **依赖**: 无
+- **测试命令**:
+  ```bash
+  pnpm dev
+  # 手工测试: 未认证访问、异常输入
+  ```
+- **测试重点**:
+  - 认证检查的完整性
+  - 输入验证(参数类型、范围)
+  - 错误响应的规范性
+  - 日志记录的完整性
 
 ## 验收标准
-- [ ] 庄家优势在所有游戏场景下稳定在5-8%范围内，通过10000+轮次模拟验证
-- [ ] 所有可证明公平相关代码、数据库字段、API响应、UI元素已完全移除
-- [ ] 市场价格透明度API正常工作，前端正确展示实时价格数据和数据来源
-- [ ] 用户可成功发起提现请求，管理员可审核，LDC退款集成正常工作
-- [ ] 提现流程包含完整的错误处理和余额一致性保障
+- [ ] 资金并发一致性: balanceBefore/After 准确,资金流水完整关联 betId
+- [ ] Round 状态机完整: 所有状态转换落库,无并发滑入风险
+- [ ] WebSocket 策略统一: 匿名/认证连接策略明确,重连状态同步完整
+- [ ] 客户端状态初始化: 刷新/重连后 state 正确恢复,下注体验流畅
+- [ ] 快速风险点修复: balance API 认证和错误处理完整
 - [ ] 所有单元测试通过
 - [ ] 代码覆盖率 ≥90%
+- [ ] 并发压力测试通过(100+ 并发请求无数据不一致)
+- [ ] 手工验证完整用户流程: 登录 → 连接 → 下注 → 结算 → 刷新 → 重连
 
 ## 技术要点
-- **庄家优势算法**: 使用确定性公式计算赔率，避免随机性导致的优势波动；在constants中配置目标优势范围（5-8%），算法自动调整赔率系数
-- **价格透明度**: 从Bybit WebSocket获取的实时价格数据存储快照，API返回包含时间戳、来源、价格的结构化数据，前端以只读方式展示
-- **提现安全**: 使用数据库事务确保余额扣减和提现记录创建的原子性；实现乐观锁或行级锁防止并发提现导致余额超支
-- **LDC集成**: 封装LDC退款API调用，处理网络超时、API错误等异常场景，失败时回滚用户余额并记录详细日志
-- **状态机管理**: 提现状态流转严格遵循 pending → approved → completed/failed 路径，禁止非法状态跳转
-- **向后兼容**: 移除可证明公平时需考虑历史游戏记录的数据迁移，确保旧记录查询不报错
+- **并发控制**: 使用 Prisma 原子操作(`update` with `increment`/`decrement`)或数据库事务,避免读-改-写模式
+- **状态机完整性**: 每次状态转换必须立即持久化到数据库,不能仅在内存中维护
+- **WebSocket 策略**: 建议允许匿名连接但限制操作权限(只读),认证后解锁完整功能
+- **客户端恢复**: 连接建立后立即请求完整状态快照(`game:state` 事件),不依赖增量更新
+- **资金流水**: Transaction 表的 `metadata` 字段必须包含 `betId`,便于审计和对账
+- **测试覆盖**: 重点覆盖并发场景、边界条件和异常恢复路径
+- **向后兼容**: 修改 WebSocket 协议时保持客户端兼容性,使用版本协商或渐进式迁移

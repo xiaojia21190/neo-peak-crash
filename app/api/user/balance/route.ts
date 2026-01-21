@@ -1,17 +1,16 @@
 /**
  * 用户余额 API
  * GET - 获取当前用户余额
- * POST - 更新余额（投注/结算）
+ * POST - 重置游玩余额
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import {
-  getOrCreateUser,
-  getUserBalance,
-  updateUserBalance,
-  resetPlayBalance,
-} from "@/lib/services/user";
+import { getOrCreateUser } from "@/lib/services/user";
+import prisma from "@/lib/prisma";
+import { FinancialService } from "@/lib/services/financial";
+
+const financialService = new FinancialService(prisma);
 
 // 获取用户余额
 export async function GET() {
@@ -68,7 +67,7 @@ export async function POST(request: NextRequest) {
 
     const userId = session.user.id;
     const body = await request.json();
-    const { action, amount, isPlayMode } = body;
+    const { action } = body;
 
     // 验证参数
     if (!action) {
@@ -80,63 +79,15 @@ export async function POST(request: NextRequest) {
 
     // 重置游戏余额
     if (action === "reset_play_balance") {
-      const newBalance = await resetPlayBalance(userId);
+      const newBalance = await financialService.setPlayBalance(userId, 10000);
       return NextResponse.json({ playBalance: newBalance });
     }
 
-    // 更新余额 - 仅允许游玩模式下的扣款操作
-    // 真实余额增加只能通过支付回调，不允许客户端直接操作
     if (action === "update") {
-      if (typeof amount !== "number" || !Number.isFinite(amount)) {
-        return NextResponse.json(
-          { error: "无效的金额" },
-          { status: 400 }
-        );
-      }
-
-      // 安全限制：真实模式下只允许扣款（负数金额）
-      // 充值必须通过支付回调处理
-      if (!isPlayMode && amount > 0) {
-        return NextResponse.json(
-          { error: "不允许直接增加真实余额" },
-          { status: 403 }
-        );
-      }
-
-      // 检查当前余额
-      const currentBalance = await getUserBalance(userId);
-      if (!currentBalance) {
-        return NextResponse.json(
-          { error: "用户不存在" },
-          { status: 404 }
-        );
-      }
-
-      const currentValue = isPlayMode
-        ? currentBalance.playBalance
-        : currentBalance.balance;
-
-      // 如果是扣款，检查余额是否足够
-      if (amount < 0 && currentValue + amount < 0) {
-        return NextResponse.json(
-          { error: "余额不足" },
-          { status: 400 }
-        );
-      }
-
-      const result = await updateUserBalance(userId, amount, isPlayMode);
-
-      if (!result) {
-        return NextResponse.json(
-          { error: "更新余额失败" },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({
-        balance: result.balance,
-        playBalance: result.playBalance,
-      });
+      return NextResponse.json(
+        { error: "此 API 已禁用。余额变更由服务端游戏引擎处理。" },
+        { status: 403 }
+      );
     }
 
     return NextResponse.json(

@@ -6,16 +6,38 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import type { Server as HTTPServer } from 'http';
 import type { Redis } from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
-import { GameEngine } from './GameEngine';
-import { PriceService } from './PriceService';
 import { WS_EVENTS, ERROR_CODES } from './constants';
-import type { PlaceBetRequest } from './types';
+import type { PlaceBetRequest, GameStateSnapshot, StateSnapshotMessage, UserStateSnapshot } from './types';
 import { GameError } from './errors';
 
 export interface WSGatewayConfig {
   cors?: {
     origin: string | string[];
     credentials?: boolean;
+  };
+  heartbeat?: {
+    /**
+     * 服务端主动推送 PONG 的间隔（ms），用于连接保活/延迟检测
+     * 默认 25000ms
+     */
+    intervalMs?: number;
+  };
+  stateSync?: {
+    /**
+     * 连接后是否重放当前 Round 下注（用于旧客户端恢复）
+     * 默认 true
+     */
+    replayCurrentRoundBets?: boolean;
+    /**
+     * 状态快照返回的历史下注数量（默认 20）
+     */
+    historyLimit?: number;
+  };
+  deps?: {
+    gameEngine?: GameEnginePort;
+    priceService?: PriceServicePort;
+    verifyToken?: (token: string) => Promise<string | null>;
+    verifyTokenFromCookie?: (socket: AuthenticatedSocket) => Promise<string | null>;
   };
 }
 
@@ -24,12 +46,36 @@ export interface AuthenticatedSocket extends Socket {
   isAuthenticated?: boolean;
 }
 
+export interface GameEnginePort {
+  getState: () => any;
+  getConfig: () => any;
+  placeBet: (userId: string, request: PlaceBetRequest) => Promise<unknown>;
+  stop: () => Promise<void>;
+  removeAllListeners: (event?: string) => unknown;
+  on: (event: string, listener: (...args: any[]) => void) => unknown;
+}
+
+export interface PriceServicePort {
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  removeAllListeners: (event?: string) => unknown;
+  on: (event: string, listener: (...args: any[]) => void) => unknown;
+  off?: (event: string, listener: (...args: any[]) => void) => unknown;
+}
+
 export class WebSocketGateway {
   private io: SocketIOServer;
-  private gameEngine: GameEngine;
-  private priceService: PriceService;
+  private gameEngine: GameEnginePort | null;
+  private priceService: PriceServicePort | null;
   private connectedUsers: Map<string, Set<string>> = new Map(); // userId -> socketIds
   private allowedOrigins: Set<string>;
+  private readonly heartbeatIntervalMs: number;
+  private readonly replayCurrentRoundBets: boolean;
+  private readonly historyLimit: number;
+  private readonly verifyToken: (token: string) => Promise<string | null>;
+  private readonly verifyTokenFromCookie: (socket: AuthenticatedSocket) => Promise<string | null>;
+  private readonly socketHeartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private gameEngineListenersReady = false;
 
   constructor(
     httpServer: HTTPServer,
@@ -63,24 +109,36 @@ export class WebSocketGateway {
       transports: ['websocket', 'polling'],
     });
 
-    // 初始化 PriceService
-    this.priceService = new PriceService({
-      asset: 'BTC',
-      allowStartWithoutConnection: true
-    }, redis);
+    this.heartbeatIntervalMs = Math.max(1000, config?.heartbeat?.intervalMs ?? 25_000);
+    this.replayCurrentRoundBets = config?.stateSync?.replayCurrentRoundBets ?? true;
+    this.historyLimit = Math.max(0, Math.min(200, config?.stateSync?.historyLimit ?? 20));
 
-    // 初始化 GameEngine
-    this.gameEngine = new GameEngine(redis, prisma, this.priceService);
+    this.gameEngine = config?.deps?.gameEngine ?? null;
+    this.priceService = config?.deps?.priceService ?? null;
+
+    this.verifyToken =
+      config?.deps?.verifyToken ??
+      (async (token: string) => {
+        const { verifyNextAuthToken } = await import('./wsAuth');
+        return verifyNextAuthToken({ token, prisma: this.prisma });
+      });
+
+    this.verifyTokenFromCookie =
+      config?.deps?.verifyTokenFromCookie ??
+      (async (socket: AuthenticatedSocket) => {
+        const { verifyNextAuthCookie } = await import('./wsAuth');
+        return verifyNextAuthCookie({ req: socket.request as any, prisma: this.prisma });
+      });
 
     this.setupEventHandlers();
-    this.setupGameEngineListeners();
   }
 
   /**
    * 启动服务
    */
   async start(): Promise<void> {
-    await this.priceService.start();
+    await this.ensureServicesReady();
+    await this.priceService!.start();
     console.log('[WSGateway] Started');
   }
 
@@ -88,10 +146,19 @@ export class WebSocketGateway {
    * 停止服务
    */
   async stop(): Promise<void> {
-    await this.gameEngine.stop();
-    await this.priceService.stop();
-    this.gameEngine.removeAllListeners();
-    this.priceService.removeAllListeners();
+    for (const timer of this.socketHeartbeatTimers.values()) {
+      clearInterval(timer);
+    }
+    this.socketHeartbeatTimers.clear();
+
+    if (this.gameEngine) {
+      await this.gameEngine.stop();
+      this.gameEngine.removeAllListeners();
+    }
+    if (this.priceService) {
+      await this.priceService.stop();
+      this.priceService.removeAllListeners();
+    }
     this.io.close();
     console.log('[WSGateway] Stopped');
   }
@@ -99,15 +166,44 @@ export class WebSocketGateway {
   /**
    * 获取 GameEngine 实例
    */
-  getGameEngine(): GameEngine {
-    return this.gameEngine;
+  getGameEngine(): import('./GameEngine').GameEngine {
+    if (!this.gameEngine) {
+      throw new Error('GameEngine not initialized. Did you forget to call gateway.start()?');
+    }
+    return this.gameEngine as unknown as import('./GameEngine').GameEngine;
   }
 
   /**
    * 获取 PriceService 实例
    */
-  getPriceService(): PriceService {
-    return this.priceService;
+  getPriceService(): import('./PriceService').PriceService {
+    if (!this.priceService) {
+      throw new Error('PriceService not initialized. Did you forget to call gateway.start()?');
+    }
+    return this.priceService as unknown as import('./PriceService').PriceService;
+  }
+
+  private async ensureServicesReady(): Promise<void> {
+    if (!this.priceService) {
+      const { PriceService } = await import('./PriceService');
+      this.priceService = new PriceService(
+        {
+          asset: 'BTC',
+          allowStartWithoutConnection: true,
+        },
+        this.redis
+      ) as unknown as PriceServicePort;
+    }
+
+    if (!this.gameEngine) {
+      const { GameEngine } = await import('./GameEngine');
+      this.gameEngine = new GameEngine(this.redis, this.prisma, this.priceService as any) as unknown as GameEnginePort;
+    }
+
+    if (!this.gameEngineListenersReady) {
+      this.setupGameEngineListeners();
+      this.gameEngineListenersReady = true;
+    }
   }
 
   private isOriginAllowed(socket: AuthenticatedSocket): boolean {
@@ -135,63 +231,362 @@ export class WebSocketGateway {
 
       console.log(`[WSGateway] Client connected: ${socket.id}`);
 
-      // 自动从Cookie认证
-      await this.handleAutoAuth(socket);
-      if (!socket.isAuthenticated) {
-        return;
-      }
+      this.registerSocketHandlers(socket);
 
-      // 发送当前游戏状态给新连接的用户
-      const currentState = this.gameEngine.getState();
-      if (currentState) {
-        socket.emit(WS_EVENTS.STATE_UPDATE, {
-          type: WS_EVENTS.STATE_UPDATE,
+      // 自动从 Cookie 认证（允许匿名）
+      await this.handleAutoAuth(socket);
+
+      // 连接后进行完整状态同步（匿名也需要）
+      void this.syncStateForSocket(socket, { reason: 'connect' }).catch((error) => {
+        console.error('[WSGateway] Failed to sync state after connect:', error);
+      });
+    });
+  }
+
+  private registerSocketHandlers(socket: AuthenticatedSocket): void {
+    // 服务端主动心跳：定期发送 PONG（不依赖客户端 ping）
+    const timer = setInterval(() => {
+      if (socket.connected) {
+        socket.emit(WS_EVENTS.PONG, { timestamp: Date.now() });
+      }
+    }, this.heartbeatIntervalMs);
+    this.socketHeartbeatTimers.set(socket.id, timer);
+
+    // 客户端心跳：ping -> pong
+    socket.on(WS_EVENTS.PING, () => {
+      socket.emit(WS_EVENTS.PONG, { timestamp: Date.now() });
+    });
+
+    // 显式认证（兼容非 Cookie 场景）
+    socket.on(WS_EVENTS.AUTH, (data: { token: string }) => {
+      void this.handleAuth(socket, data).catch((error) => {
+        console.error('[WSGateway] Unhandled error in auth handler:', error);
+      });
+    });
+
+    // 客户端请求状态快照（用于重连/主动同步）
+    socket.on(
+      WS_EVENTS.STATE_REQUEST,
+      (payload?: { includeHistory?: boolean; historyLimit?: number }) => {
+        void this.syncStateForSocket(socket, {
+          reason: 'state_request',
+          includeHistory: payload?.includeHistory,
+          historyLimit: payload?.historyLimit,
+        }).catch((error) => {
+          console.error('[WSGateway] Failed to sync state after state_request:', error);
+        });
+      }
+    );
+
+    // 下注 - 包装异常处理防止未处理的 Promise 拒绝
+    socket.on(WS_EVENTS.PLACE_BET, (data) => {
+      void this.handlePlaceBet(socket, data as PlaceBetRequest).catch((error) => {
+        console.error('[WSGateway] Unhandled error in place_bet handler:', error);
+        socket.emit(WS_EVENTS.BET_REJECTED, {
+          type: WS_EVENTS.BET_REJECTED,
           payload: {
-            roundId: currentState.roundId,
-            status: currentState.status,
-            asset: currentState.asset,
-            startPrice: currentState.startPrice,
-            currentPrice: currentState.currentPrice,
-            currentRow: currentState.currentRow,
-            elapsed: currentState.elapsed,
-            bettingDuration: this.gameEngine.getConfig().bettingDuration,
-            maxDuration: this.gameEngine.getConfig().maxDuration,
+            orderId: (data as any)?.orderId ?? 'unknown',
+            code: 'INTERNAL_ERROR',
+            message: '服务器内部错误',
+          },
+          timestamp: Date.now(),
+        });
+      });
+    });
+
+    // 断开连接
+    socket.on('disconnect', () => this.handleDisconnect(socket));
+  }
+
+  private async syncStateForSocket(
+    socket: AuthenticatedSocket,
+    options: { reason: 'connect' | 'auth' | 'state_request'; includeHistory?: boolean; historyLimit?: number }
+  ): Promise<void> {
+    const game = this.buildGameStateSnapshot();
+    const includeHistory = options.includeHistory ?? true;
+    const historyLimit = options.historyLimit ?? this.historyLimit;
+
+    const user =
+      socket.isAuthenticated && socket.userId
+        ? await this.buildUserStateSnapshot(socket.userId, { includeHistory, historyLimit })
+        : null;
+
+    const message: StateSnapshotMessage = {
+      type: WS_EVENTS.STATE_SNAPSHOT,
+      payload: {
+        serverTime: Date.now(),
+        connectionId: socket.id,
+        isAuthenticated: Boolean(socket.isAuthenticated && socket.userId),
+        userId: socket.userId ?? null,
+        game,
+        user,
+      },
+      timestamp: Date.now(),
+    };
+
+    socket.emit(WS_EVENTS.STATE_SNAPSHOT, message);
+
+    // 旧客户端兼容：通过既有事件初始化/恢复 Round 状态
+    this.emitLegacyGameSnapshot(socket, game);
+
+    // 旧客户端兼容：重放当前 Round 的下注（用于重连恢复 activeBets）
+    if (this.replayCurrentRoundBets && socket.isAuthenticated && socket.userId && game.roundId) {
+      await this.replayCurrentRoundBetEvents(socket, socket.userId, game.roundId);
+    }
+  }
+
+  private buildGameStateSnapshot(): GameStateSnapshot {
+    const config = this.gameEngine?.getConfig?.() ?? { asset: 'BTCUSDT', bettingDuration: 5, maxDuration: 60 };
+    const state = this.gameEngine?.getState?.() ?? null;
+
+    if (!state) {
+      return {
+        roundId: null,
+        status: null,
+        asset: config.asset ?? 'BTCUSDT',
+        startPrice: 0,
+        currentPrice: 0,
+        currentRow: 6.5,
+        elapsed: 0,
+        startTime: 0,
+        bettingDuration: this.toNumber(config.bettingDuration, 5),
+        maxDuration: this.toNumber(config.maxDuration, 60),
+      };
+    }
+
+    return {
+      roundId: state.roundId ?? null,
+      status: state.status ?? null,
+      asset: state.asset ?? config.asset ?? 'BTCUSDT',
+      startPrice: this.toNumber(state.startPrice, 0),
+      currentPrice: this.toNumber(state.currentPrice, 0),
+      currentRow: this.toNumber(state.currentRow, 6.5),
+      elapsed: this.toNumber(state.elapsed, 0),
+      startTime: this.toNumber(state.roundStartTime, 0),
+      bettingDuration: this.toNumber(config.bettingDuration, 5),
+      maxDuration: this.toNumber(config.maxDuration, 60),
+    };
+  }
+
+  private async buildUserStateSnapshot(
+    userId: string,
+    options: { includeHistory: boolean; historyLimit: number }
+  ): Promise<UserStateSnapshot> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { balance: true, playBalance: true },
+    });
+
+    const snapshot: UserStateSnapshot = {
+      balance: this.toNumber(user?.balance, 0),
+      playBalance: this.toNumber(user?.playBalance, 0),
+      recentBets: [],
+    };
+
+    if (!options.includeHistory || options.historyLimit <= 0) {
+      return snapshot;
+    }
+
+    const bets = await this.prisma.bet.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: options.historyLimit,
+      select: {
+        id: true,
+        orderId: true,
+        roundId: true,
+        amount: true,
+        multiplier: true,
+        targetRow: true,
+        targetTime: true,
+        rowIndex: true,
+        colIndex: true,
+        status: true,
+        isWin: true,
+        payout: true,
+        isPlayMode: true,
+        hitPrice: true,
+        hitRow: true,
+        hitTime: true,
+        createdAt: true,
+        settledAt: true,
+      },
+    });
+
+    snapshot.recentBets = bets.map((bet: any) => {
+      const targetRow = bet.targetRow ?? bet.rowIndex;
+      const targetTime = bet.targetTime ?? bet.colIndex;
+      const hasHitDetails = bet.hitPrice != null && bet.hitRow != null && bet.hitTime != null;
+
+      return {
+        betId: bet.id,
+        orderId: bet.orderId ?? null,
+        roundId: bet.roundId ?? null,
+        amount: this.toNumber(bet.amount, 0),
+        multiplier: this.toNumber(bet.multiplier, 0),
+        targetRow: targetRow != null ? this.toNumber(targetRow, 0) : null,
+        targetTime: targetTime != null ? this.toNumber(targetTime, 0) : null,
+        status: bet.status,
+        isWin: Boolean(bet.isWin),
+        payout: this.toNumber(bet.payout, 0),
+        isPlayMode: Boolean(bet.isPlayMode),
+        hitDetails: hasHitDetails
+          ? {
+              hitPrice: this.toNumber(bet.hitPrice, 0),
+              hitRow: this.toNumber(bet.hitRow, 0),
+              hitTime: this.toNumber(bet.hitTime, 0),
+            }
+          : undefined,
+        createdAt: bet.createdAt instanceof Date ? bet.createdAt.getTime() : this.toNumber(bet.createdAt, 0),
+        settledAt: bet.settledAt instanceof Date ? bet.settledAt.getTime() : bet.settledAt == null ? null : this.toNumber(bet.settledAt, 0),
+      };
+    });
+
+    return snapshot;
+  }
+
+  private emitLegacyGameSnapshot(socket: AuthenticatedSocket, game: GameStateSnapshot): void {
+    if (!game.roundId || !game.status) {
+      return;
+    }
+
+    socket.emit(WS_EVENTS.ROUND_START, {
+      type: WS_EVENTS.ROUND_START,
+      payload: {
+        roundId: game.roundId,
+        asset: game.asset,
+        startPrice: game.startPrice,
+        startTime: game.startTime,
+        bettingDuration: game.bettingDuration,
+        maxDuration: game.maxDuration,
+      },
+      timestamp: Date.now(),
+    });
+
+    if (game.status !== 'BETTING') {
+      socket.emit(WS_EVENTS.ROUND_RUNNING, {
+        type: WS_EVENTS.ROUND_RUNNING,
+        payload: { roundId: game.roundId },
+        timestamp: Date.now(),
+      });
+    }
+
+    socket.emit(WS_EVENTS.STATE_UPDATE, {
+      type: WS_EVENTS.STATE_UPDATE,
+      payload: {
+        elapsed: game.elapsed,
+        currentPrice: game.currentPrice,
+        currentRow: game.currentRow,
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  private async replayCurrentRoundBetEvents(socket: AuthenticatedSocket, userId: string, roundId: string): Promise<void> {
+    const bets = await this.prisma.bet.findMany({
+      where: { userId, roundId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        orderId: true,
+        amount: true,
+        multiplier: true,
+        targetRow: true,
+        targetTime: true,
+        rowIndex: true,
+        colIndex: true,
+        status: true,
+        payout: true,
+        hitPrice: true,
+        hitRow: true,
+        hitTime: true,
+      },
+    });
+
+    for (const bet of bets as any[]) {
+      if (!bet.orderId) continue;
+
+      const targetRow = bet.targetRow ?? bet.rowIndex;
+      const targetTime = bet.targetTime ?? bet.colIndex;
+
+      socket.emit(WS_EVENTS.BET_CONFIRMED, {
+        type: WS_EVENTS.BET_CONFIRMED,
+        payload: {
+          orderId: bet.orderId,
+          betId: bet.id,
+          multiplier: this.toNumber(bet.multiplier, 0),
+          targetRow: this.toNumber(targetRow, 0),
+          targetTime: this.toNumber(targetTime, 0),
+          amount: this.toNumber(bet.amount, 0),
+        },
+        timestamp: Date.now(),
+      });
+
+      if (bet.status === 'WON' || bet.status === 'LOST') {
+        const hasHitDetails = bet.hitPrice != null && bet.hitRow != null && bet.hitTime != null;
+        socket.emit(WS_EVENTS.BET_SETTLED, {
+          type: WS_EVENTS.BET_SETTLED,
+          payload: {
+            betId: bet.id,
+            orderId: bet.orderId,
+            isWin: bet.status === 'WON',
+            payout: this.toNumber(bet.payout, 0),
+            hitDetails: hasHitDetails
+              ? {
+                  hitPrice: this.toNumber(bet.hitPrice, 0),
+                  hitRow: this.toNumber(bet.hitRow, 0),
+                  hitTime: this.toNumber(bet.hitTime, 0),
+                }
+              : undefined,
           },
           timestamp: Date.now(),
         });
       }
 
-      // 下注 - 包装异常处理防止未处理的Promise拒绝
-      socket.on(WS_EVENTS.PLACE_BET, (data) => {
-        void this.handlePlaceBet(socket, data).catch((error) => {
-          console.error('[WSGateway] Unhandled error in place_bet handler:', error);
-          // 发送通用错误响应
-          socket.emit(WS_EVENTS.BET_REJECTED, {
-            type: WS_EVENTS.BET_REJECTED,
-            payload: {
-              orderId: data?.orderId ?? 'unknown',
-              code: 'INTERNAL_ERROR',
-              message: '服务器内部错误',
-            },
-            timestamp: Date.now(),
-          });
+      if (bet.status === 'REFUNDED') {
+        socket.emit(WS_EVENTS.BET_REFUNDED, {
+          type: WS_EVENTS.BET_REFUNDED,
+          payload: {
+            betId: bet.id,
+            orderId: bet.orderId,
+            userId,
+            amount: this.toNumber(bet.amount, 0),
+            reason: 'reconnect_sync',
+          },
+          timestamp: Date.now(),
         });
-      });
+      }
+    }
+  }
 
-      // 心跳
-      socket.on(WS_EVENTS.PING, () => {
-        socket.emit(WS_EVENTS.PONG, { timestamp: Date.now() });
-      });
-
-      // 断开连接
-      socket.on('disconnect', () => this.handleDisconnect(socket));
-    });
+  private toNumber(value: unknown, fallback: number): number {
+    if (value == null) return fallback;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+    if (typeof value === 'string') {
+      const parsed = Number.parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+    const maybeToNumber = (value as any)?.toNumber;
+    if (typeof maybeToNumber === 'function') {
+      try {
+        const num = maybeToNumber.call(value);
+        return Number.isFinite(num) ? num : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+    const coerced = Number(value);
+    return Number.isFinite(coerced) ? coerced : fallback;
   }
 
   /**
    * 设置 GameEngine 事件监听
    */
   private setupGameEngineListeners(): void {
+    if (!this.gameEngine || !this.priceService) {
+      return;
+    }
+
     // 回合开始
     this.gameEngine.on('round:start', (data) => {
       this.io.emit(WS_EVENTS.ROUND_START, {
@@ -317,9 +712,17 @@ export class WebSocketGateway {
    */
   private async handleAuth(socket: AuthenticatedSocket, data: { token: string }): Promise<void> {
     try {
-      // TODO: 验证 JWT token 并获取用户信息
-      // 这里简化为直接从 token 中获取 userId
-      const userId = await this.verifyToken(data.token);
+      const token = data?.token;
+      if (!token || typeof token !== 'string') {
+        socket.emit(WS_EVENTS.AUTH_RESULT, {
+          type: WS_EVENTS.AUTH_RESULT,
+          payload: { success: false, error: '无效的 token' },
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
+      const userId = await this.verifyToken(token);
 
       if (!userId) {
         socket.emit(WS_EVENTS.AUTH_RESULT, {
@@ -328,6 +731,18 @@ export class WebSocketGateway {
           timestamp: Date.now(),
         });
         return;
+      }
+
+      // 如果之前已绑定其他 userId，先清理
+      if (socket.userId && socket.userId !== userId) {
+        const oldSockets = this.connectedUsers.get(socket.userId);
+        if (oldSockets) {
+          oldSockets.delete(socket.id);
+          if (oldSockets.size === 0) {
+            this.connectedUsers.delete(socket.userId);
+          }
+        }
+        socket.leave(`user:${socket.userId}`);
       }
 
       socket.userId = userId;
@@ -349,6 +764,10 @@ export class WebSocketGateway {
       });
 
       console.log(`[WSGateway] User ${userId} authenticated`);
+
+      void this.syncStateForSocket(socket, { reason: 'auth' }).catch((error) => {
+        console.error('[WSGateway] Failed to sync state after auth:', error);
+      });
     } catch (error) {
       socket.emit(WS_EVENTS.AUTH_RESULT, {
         type: WS_EVENTS.AUTH_RESULT,
@@ -364,15 +783,10 @@ export class WebSocketGateway {
    */
   private async handleAutoAuth(socket: AuthenticatedSocket): Promise<void> {
     try {
-      if (!this.isOriginAllowed(socket)) {
-        socket.disconnect(true);
-        return;
-      }
-
       const userId = await this.verifyTokenFromCookie(socket);
 
       if (!userId) {
-        // 允许匿名连接（游玩模式）
+        // 允许匿名连接（只读）
         socket.userId = undefined;
         socket.isAuthenticated = false;
         socket.emit(WS_EVENTS.AUTH_RESULT, {
@@ -461,14 +875,14 @@ export class WebSocketGateway {
       return;
     }
 
-    // 真金模式必须登录，游玩模式允许匿名
-    if (!data.isPlayMode && (!socket.isAuthenticated || !socket.userId)) {
+    // 匿名连接只读：所有下注都需要登录
+    if (!socket.isAuthenticated || !socket.userId) {
       socket.emit(WS_EVENTS.BET_REJECTED, {
         type: WS_EVENTS.BET_REJECTED,
         payload: {
           orderId: data.orderId,
           code: 'UNAUTHORIZED',
-          message: '真金投注需要登录',
+          message: '下注需要登录',
         },
         timestamp: Date.now(),
       });
@@ -476,9 +890,10 @@ export class WebSocketGateway {
     }
 
     try {
-      // 游玩模式允许匿名，使用临时 ID
-      const effectiveUserId = socket.userId ?? `anon-${socket.id}`;
-      await this.gameEngine.placeBet(effectiveUserId, data);
+      if (!this.gameEngine) {
+        throw new Error('GameEngine not ready');
+      }
+      await this.gameEngine.placeBet(socket.userId, data);
       // 注意: bet_confirmed 事件会由 GameEngine 通过 emit('bet:confirmed') 触发
       // setupGameEngineListeners() 会监听该事件并发送给用户,无需在此处重复发送
     } catch (error) {
@@ -500,6 +915,12 @@ export class WebSocketGateway {
    * 处理断开连接
    */
   private handleDisconnect(socket: AuthenticatedSocket): void {
+    const timer = this.socketHeartbeatTimers.get(socket.id);
+    if (timer) {
+      clearInterval(timer);
+      this.socketHeartbeatTimers.delete(socket.id);
+    }
+
     if (socket.userId) {
       const userSockets = this.connectedUsers.get(socket.userId);
       if (userSockets) {
@@ -517,111 +938,6 @@ export class WebSocketGateway {
    */
   private emitToUser(userId: string, event: string, data: unknown): void {
     this.io.to(`user:${userId}`).emit(event, data);
-  }
-
-  /**
-   * 验证 NextAuth JWT token
-   */
-  private async verifyToken(token: string): Promise<string | null> {
-    try {
-      if (!token) return null;
-
-      // 使用 NextAuth 的 decode 方法验证 JWT
-      // 注意：这需要 AUTH_SECRET 或 NEXTAUTH_SECRET 环境变量
-      const { decode } = await import('next-auth/jwt');
-      const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
-
-      if (!secret) {
-        console.error('[WSGateway] AUTH_SECRET not configured');
-        return null;
-      }
-
-      const decoded = await decode({
-        token,
-        secret,
-        salt: '',
-      });
-
-      if (!decoded?.id) {
-        return null;
-      }
-
-      // 验证用户是否存在
-      const user = await this.prisma.user.findUnique({
-        where: { id: decoded.id as string },
-        select: { id: true },
-      });
-
-      return user?.id ?? null;
-    } catch (error) {
-      console.error('[WSGateway] Token verification failed:', error);
-      return null;
-    }
-  }
-
-  /**
-   * 从Cookie验证NextAuth session
-   */
-  private async verifyTokenFromCookie(socket: AuthenticatedSocket): Promise<string | null> {
-    try {
-      const cookieHeader = socket.request.headers.cookie;
-      if (!cookieHeader) {
-        return null;
-      }
-
-      // 解析Cookie获取NextAuth session token
-      const cookies = this.parseCookies(cookieHeader);
-      const sessionToken =
-        cookies['authjs.session-token'] ||
-        cookies['__Secure-authjs.session-token'] ||
-        cookies['next-auth.session-token'] ||
-        cookies['__Secure-next-auth.session-token'];
-
-      if (!sessionToken) {
-        return null;
-      }
-
-      // 使用NextAuth的getToken验证
-      const { getToken } = await import('next-auth/jwt');
-      const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
-
-      if (!secret) {
-        console.error('[WSGateway] AUTH_SECRET not configured');
-        return null;
-      }
-
-      const decoded = await getToken({
-        req: socket.request as any,
-        secret,
-      });
-
-      if (!decoded?.id) {
-        return null;
-      }
-
-      // 验证用户是否存在
-      const user = await this.prisma.user.findUnique({
-        where: { id: decoded.id as string },
-        select: { id: true },
-      });
-
-      return user?.id ?? null;
-    } catch (error) {
-      console.error('[WSGateway] Cookie verification failed:', error);
-      return null;
-    }
-  }
-
-  /**
-   * 解析Cookie字符串
-   */
-  private parseCookies(cookieHeader: string): Record<string, string> {
-    const cookies: Record<string, string> = {};
-    cookieHeader.split(';').forEach((cookie) => {
-      const [name, ...rest] = cookie.split('=');
-      cookies[name.trim()] = rest.join('=').trim();
-    });
-    return cookies;
   }
 
   /**

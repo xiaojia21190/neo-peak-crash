@@ -44,6 +44,7 @@ export const WS_EVENTS = {
   UNSUBSCRIBE: 'unsubscribe',
   PLACE_BET: 'place_bet',
   CANCEL_BET: 'cancel_bet',
+  STATE_REQUEST: 'state_request',
   PING: 'ping',
 
   // 服务端 -> 客户端
@@ -54,6 +55,7 @@ export const WS_EVENTS = {
   ROUND_CANCELLED: 'round_cancelled',
   PRICE_UPDATE: 'price_update',
   STATE_UPDATE: 'state_update',
+  STATE_SNAPSHOT: 'state_snapshot',
   BET_CONFIRMED: 'bet_confirmed',
   BET_SETTLED: 'bet_settled',
   BET_REJECTED: 'bet_rejected',

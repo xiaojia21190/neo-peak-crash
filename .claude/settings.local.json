@@ -52,7 +52,15 @@
       "Bash(npx prisma migrate:*)",
       "Bash(npx prisma db execute:*)",
       "Bash(npx prisma generate:*)",
-      "Bash(npx prisma validate:*)"
+      "Bash(npx prisma validate:*)",
+      "Bash(taskkill /F /PID 100864)",
+      "Bash(git.exe log --oneline -10)",
+      "Bash(timeout 120 tail:*)",
+      "Bash(for task in FIN-001 GAME-002 WS-003)",
+      "Bash(do if grep -q \"SESSION_ID\" \"C:\\\\Users\\\\35033\\\\AppData\\\\Local\\\\Temp\\\\codeagent-wrapper-74000-$task.log\")",
+      "Bash(then echo \"$task: COMPLETED\")",
+      "Bash(else echo \"$task: Still running\")",
+      "Bash(fi)"
     ]
   }
 }

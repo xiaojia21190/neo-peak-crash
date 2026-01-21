@@ -16,7 +16,7 @@
     "game:server": "tsx server/game-server.ts",
     "game:server:watch": "tsx watch server/game-server.ts",
     "dev:all": "concurrently \"pnpm dev\" \"pnpm game:server\"",
-    "test": "node --test --experimental-test-coverage --import tsx tests/*.test.ts",
+    "test": "node scripts/run-tests.mjs",
     "test:rateLimit": "node --test --experimental-test-coverage --import tsx tests/rateLimit.test.ts",
     "test:priceSnapshots": "node --test --experimental-test-coverage --import tsx tests/priceSnapshots.test.ts",
     "test:payoutConsistency": "node --test --experimental-test-coverage --import tsx tests/payoutConsistency.test.ts"

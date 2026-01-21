@@ -6,6 +6,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySign } from "@/lib/payment/ldc";
 import prisma from "@/lib/prisma";
+import { FinancialService } from "@/lib/services/financial";
+
+const financialService = new FinancialService(prisma);
 
 export async function GET(request: NextRequest) {
   return handleNotify(request);
@@ -79,74 +82,18 @@ async function handleNotify(request: NextRequest) {
         return new NextResponse("fail", { status: 400 });
       }
 
-      // 使用事务确保幂等性和数据一致性
       try {
-        await prisma.$transaction(async (tx) => {
-          // 加载预创建的订单
-          const existingTransaction = await tx.transaction.findUnique({
-            where: { orderNo: out_trade_no },
-          });
-
-          if (!existingTransaction) {
-            console.error(`订单 ${out_trade_no} 不存在，拒绝充值`);
-            throw new Error("订单不存在");
-          }
-
-          // 验证订单金额是否匹配
-          // 验证金额匹配 (使用整数比较避免浮点精度问题)
-          const expectedAmountCents = Math.round(Number(existingTransaction.amount) * 100);
-          const actualAmountCents = Math.round(amount * 100);
-
-          if (expectedAmountCents !== actualAmountCents) {
-            console.error(`订单 ${out_trade_no} 金额不匹配: 预期=${existingTransaction.amount}, 实际=${amount}`);
-            throw new Error("订单金额不匹配");
-          }
-
-          // 验证用户存在并获取当前余额
-          const user = await tx.user.findUnique({
-            where: { id: existingTransaction.userId },
-            select: { balance: true },
-          });
-
-          if (!user) {
-            console.error(`用户 ${existingTransaction.userId} 不存在`);
-            throw new Error("用户不存在");
-          }
-
-          const balanceBefore = Number(user.balance);
-          const balanceAfter = balanceBefore + amount;
-
-          // 原子条件更新：只有 PENDING 状态才能更新为 COMPLETED
-          const updated = await tx.transaction.updateMany({
-            where: {
-              orderNo: out_trade_no,
-              status: "PENDING"
-            },
-            data: {
-              status: "COMPLETED",
-              tradeNo: trade_no,
-              balanceBefore,
-              balanceAfter,
-              completedAt: new Date(),
-            },
-          });
-
-          // 幂等门闩：只有成功更新 1 条记录才加钱
-          if (updated.count !== 1) {
-            console.log(`订单 ${out_trade_no} 已处理或不存在，跳过加钱`);
-            return;
-          }
-
-          // 更新用户余额
-          await tx.user.update({
-            where: { id: existingTransaction.userId },
-            data: {
-              balance: { increment: amount },
-            },
-          });
-
-          console.log(`用户 ${existingTransaction.userId} 充值 ${amount} LDC 成功`);
+        const result = await financialService.completeRechargeOrder({
+          orderNo: out_trade_no,
+          tradeNo: trade_no,
+          amount,
         });
+
+        if (!result.processed) {
+          console.log(`订单 ${out_trade_no} 已处理，幂等跳过`);
+        } else {
+          console.log(`订单 ${out_trade_no} 充值成功: ${result.balanceBefore} -> ${result.balanceAfter}`);
+        }
       } catch (dbError) {
         console.error("数据库操作失败:", dbError);
         return new NextResponse("fail", { status: 500 });

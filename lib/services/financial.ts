@@ -13,7 +13,9 @@
  * @module FinancialService
  */
 
-import type { PrismaClient, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { roundMoney } from '../shared/gameMath';
 
 export type FinancialOperationType =
   | 'RECHARGE'   // User deposits funds
@@ -56,6 +58,33 @@ export interface BatchBalanceChangeResult {
   transactionIds: string[];
 }
 
+function normalizeOptionalString(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function toCents(amount: number): number {
+  return Math.round(Math.abs(amount) * 100) * Math.sign(amount);
+}
+
+function centsToNumber(cents: number): number {
+  return cents / 100;
+}
+
+function isRecordNotFoundError(error: unknown): boolean {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return error.code === 'P2025';
+  }
+
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string' &&
+    (error as { code: string }).code === 'P2025'
+  );
+}
+
 /**
  * FinancialService - Handles all balance and ledger operations
  *
@@ -82,58 +111,73 @@ export class FinancialService {
     params: BalanceChangeParams,
     tx?: Prisma.TransactionClient
   ): Promise<BalanceChangeResult> {
-    const { userId, amount, type, isPlayMode, relatedBetId, remark, orderNo, tradeNo } = params;
-
-    const prismaClient = tx || this.prisma;
+    const isPlayMode = params.isPlayMode ?? false;
 
     // Anonymous users only support play mode
-    const isAnonymous = userId.startsWith('anon-');
+    const isAnonymous = params.userId.startsWith('anon-');
     if (isAnonymous && !isPlayMode) {
       throw new Error('Anonymous users can only use play mode');
     }
 
     // For anonymous users in play mode, skip database operations
     if (isAnonymous && isPlayMode) {
-      return {
-        balanceBefore: 0,
-        balanceAfter: 0,
-      };
+      return { balanceBefore: 0, balanceAfter: 0 };
     }
 
+    if (tx) {
+      return this.changeBalanceInTx(params, tx);
+    }
+
+    return this.prisma.$transaction((innerTx) => this.changeBalanceInTx(params, innerTx));
+  }
+
+  private async changeBalanceInTx(
+    params: BalanceChangeParams,
+    tx: Prisma.TransactionClient
+  ): Promise<BalanceChangeResult> {
+    const isPlayMode = params.isPlayMode ?? false;
     const balanceField = isPlayMode ? 'playBalance' : 'balance';
 
-    // Get current balance
-    const user = await prismaClient.user.findUnique({
-      where: { id: userId },
-      select: { balance: true, playBalance: true },
-    });
+    const amount = roundMoney(params.amount);
+    const amountCents = toCents(amount);
+    const relatedBetId = normalizeOptionalString(params.relatedBetId);
+    const remark = normalizeOptionalString(params.remark);
+    const orderNo = normalizeOptionalString(params.orderNo);
+    const tradeNo = normalizeOptionalString(params.tradeNo);
 
-    if (!user) {
-      throw new Error(`User ${userId} not found`);
+    // Single statement update (row-locked) + use resulting value to derive before/after.
+    let updatedUser: any;
+    try {
+      updatedUser = await tx.user.update({
+        where: { id: params.userId },
+        data: { [balanceField]: { increment: amount } },
+        select: { [balanceField]: true },
+      });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) {
+        throw new Error(`User ${params.userId} not found`);
+      }
+      throw error;
     }
 
-    const balanceBefore = Number(balanceField === 'balance' ? user.balance : user.playBalance);
+    const balanceAfterCents = toCents(Number(updatedUser[balanceField]));
+    const balanceBeforeCents = balanceAfterCents - amountCents;
 
-    // Update balance
-    await prismaClient.user.update({
-      where: { id: userId },
-      data: { [balanceField]: { increment: amount } },
-    });
-
-    const balanceAfter = balanceBefore + amount;
+    const balanceBefore = centsToNumber(balanceBeforeCents);
+    const balanceAfter = centsToNumber(balanceAfterCents);
 
     // Record transaction (only for real balance, not play mode)
     let transactionId: string | undefined;
     if (!isPlayMode) {
-      const transaction = await prismaClient.transaction.create({
+      const transaction = await tx.transaction.create({
         data: {
-          userId,
-          type,
+          userId: params.userId,
+          type: params.type,
           amount,
           balanceBefore,
           balanceAfter,
           relatedBetId,
-          remark: remark || this.buildRemark(type, relatedBetId),
+          remark: remark || this.buildRemark(params.type, relatedBetId),
           orderNo,
           tradeNo,
           status: 'COMPLETED',
@@ -143,11 +187,7 @@ export class FinancialService {
       transactionId = transaction.id;
     }
 
-    return {
-      balanceBefore,
-      balanceAfter,
-      transactionId,
-    };
+    return { balanceBefore, balanceAfter, transactionId };
   }
 
   /**
@@ -169,83 +209,91 @@ export class FinancialService {
     params: BatchBalanceChangeParams,
     tx?: Prisma.TransactionClient
   ): Promise<BatchBalanceChangeResult> {
-    const { userId, changes, isPlayMode } = params;
-    const prismaClient = tx || this.prisma;
+    const isPlayMode = params.isPlayMode ?? false;
 
     // Anonymous users in play mode skip database
-    const isAnonymous = userId.startsWith('anon-');
+    const isAnonymous = params.userId.startsWith('anon-');
     if (isAnonymous && isPlayMode) {
-      return {
-        balanceBefore: 0,
-        balanceAfter: 0,
-        transactionIds: [],
-      };
+      return { balanceBefore: 0, balanceAfter: 0, transactionIds: [] };
     }
-
     if (isAnonymous && !isPlayMode) {
       throw new Error('Anonymous users can only use play mode');
     }
 
-    const balanceField = isPlayMode ? 'playBalance' : 'balance';
-
-    // Get current balance
-    const user = await prismaClient.user.findUnique({
-      where: { id: userId },
-      select: { balance: true, playBalance: true },
-    });
-
-    if (!user) {
-      throw new Error(`User ${userId} not found`);
+    if (tx) {
+      return this.batchChangeBalanceInTx(params, tx);
     }
 
-    const balanceBefore = Number(balanceField === 'balance' ? user.balance : user.playBalance);
+    return this.prisma.$transaction((innerTx) => this.batchChangeBalanceInTx(params, innerTx));
+  }
 
-    // Calculate total change
-    const totalChange = changes.reduce((sum, change) => sum + change.amount, 0);
+  private async batchChangeBalanceInTx(
+    params: BatchBalanceChangeParams,
+    tx: Prisma.TransactionClient
+  ): Promise<BatchBalanceChangeResult> {
+    const isPlayMode = params.isPlayMode ?? false;
+    const balanceField = isPlayMode ? 'playBalance' : 'balance';
 
-    // Update balance once
-    await prismaClient.user.update({
-      where: { id: userId },
-      data: { [balanceField]: { increment: totalChange } },
-    });
+    const normalizedChanges = params.changes.map((change) => ({
+      ...change,
+      amount: roundMoney(change.amount),
+      relatedBetId: normalizeOptionalString(change.relatedBetId),
+      remark: normalizeOptionalString(change.remark),
+    }));
 
-    const balanceAfter = balanceBefore + totalChange;
+    const totalChangeCents = normalizedChanges.reduce((sum, change) => sum + toCents(change.amount), 0);
+    const totalChange = centsToNumber(totalChangeCents);
+
+    let updatedUser: any;
+    try {
+      updatedUser = await tx.user.update({
+        where: { id: params.userId },
+        data: { [balanceField]: { increment: totalChange } },
+        select: { [balanceField]: true },
+      });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) {
+        throw new Error(`User ${params.userId} not found`);
+      }
+      throw error;
+    }
+
+    const balanceAfterCents = toCents(Number(updatedUser[balanceField]));
+    const balanceBeforeCents = balanceAfterCents - totalChangeCents;
+
+    const balanceBefore = centsToNumber(balanceBeforeCents);
+    const balanceAfter = centsToNumber(balanceAfterCents);
 
     // Record transactions (only for real balance)
     const transactionIds: string[] = [];
-    if (!isPlayMode && changes.length > 0) {
-      let currentBalance = balanceBefore;
+    if (!isPlayMode && normalizedChanges.length > 0) {
+      let runningCents = balanceBeforeCents;
+      const completedAt = new Date();
 
-      const transactionData = changes.map((change) => {
-        const balanceBeforeThis = currentBalance;
-        currentBalance += change.amount;
+      for (const change of normalizedChanges) {
+        const beforeCents = runningCents;
+        const changeCents = toCents(change.amount);
+        const afterCents = beforeCents + changeCents;
+        runningCents = afterCents;
 
-        return {
-          userId,
-          type: change.type,
-          amount: change.amount,
-          balanceBefore: balanceBeforeThis,
-          balanceAfter: currentBalance,
-          relatedBetId: change.relatedBetId,
-          remark: change.remark || this.buildRemark(change.type, change.relatedBetId),
-          status: 'COMPLETED' as const,
-          completedAt: new Date(),
-        };
-      });
-
-      // For batch insert, we can't get IDs back easily with createMany
-      // So we create them individually to track IDs
-      for (const data of transactionData) {
-        const transaction = await prismaClient.transaction.create({ data });
+        const transaction = await tx.transaction.create({
+          data: {
+            userId: params.userId,
+            type: change.type,
+            amount: change.amount,
+            balanceBefore: centsToNumber(beforeCents),
+            balanceAfter: centsToNumber(afterCents),
+            relatedBetId: change.relatedBetId,
+            remark: change.remark || this.buildRemark(change.type, change.relatedBetId),
+            status: 'COMPLETED',
+            completedAt,
+          },
+        });
         transactionIds.push(transaction.id);
       }
     }
 
-    return {
-      balanceBefore,
-      balanceAfter,
-      transactionIds,
-    };
+    return { balanceBefore, balanceAfter, transactionIds };
   }
 
   /**
@@ -262,86 +310,89 @@ export class FinancialService {
     params: BalanceChangeParams & { minBalance?: number },
     tx?: Prisma.TransactionClient
   ): Promise<{ success: boolean; result?: BalanceChangeResult; error?: string }> {
-    const { userId, amount, type, isPlayMode, minBalance, relatedBetId, remark, orderNo, tradeNo } = params;
-    const prismaClient = tx || this.prisma;
+    const isPlayMode = params.isPlayMode ?? false;
 
     // Anonymous users in play mode always succeed
-    const isAnonymous = userId.startsWith('anon-');
+    const isAnonymous = params.userId.startsWith('anon-');
     if (isAnonymous && isPlayMode) {
-      return {
-        success: true,
-        result: {
-          balanceBefore: 0,
-          balanceAfter: 0,
-        },
-      };
+      return { success: true, result: { balanceBefore: 0, balanceAfter: 0 } };
     }
-
     if (isAnonymous && !isPlayMode) {
-      return {
-        success: false,
-        error: 'Anonymous users can only use play mode',
-      };
+      return { success: false, error: 'Anonymous users can only use play mode' };
     }
 
+    const amount = roundMoney(params.amount);
+    if (amount >= 0) {
+      try {
+        const result = tx
+          ? await this.changeBalanceInTx({ ...params, amount }, tx)
+          : await this.changeBalance({ ...params, amount });
+        return { success: true, result };
+      } catch (error) {
+        return { success: false, error: (error as Error).message || 'Unknown error' };
+      }
+    }
+
+    if (tx) {
+      return this.conditionalChangeBalanceInTx({ ...params, amount }, tx);
+    }
+    return this.prisma.$transaction((innerTx) =>
+      this.conditionalChangeBalanceInTx({ ...params, amount }, innerTx)
+    );
+  }
+
+  private async conditionalChangeBalanceInTx(
+    params: BalanceChangeParams & { minBalance?: number },
+    tx: Prisma.TransactionClient
+  ): Promise<{ success: boolean; result?: BalanceChangeResult; error?: string }> {
+    const isPlayMode = params.isPlayMode ?? false;
     const balanceField = isPlayMode ? 'playBalance' : 'balance';
 
-    // Get current balance
-    const user = await prismaClient.user.findUnique({
-      where: { id: userId },
-      select: { balance: true, playBalance: true },
+    const amount = roundMoney(params.amount);
+    const amountCents = toCents(amount);
+    const requiredBalance = roundMoney(params.minBalance !== undefined ? params.minBalance : -amount);
+    const relatedBetId = normalizeOptionalString(params.relatedBetId);
+    const remark = normalizeOptionalString(params.remark);
+    const orderNo = normalizeOptionalString(params.orderNo);
+    const tradeNo = normalizeOptionalString(params.tradeNo);
+
+    const updateResult = await tx.user.updateMany({
+      where: { id: params.userId, [balanceField]: { gte: requiredBalance } },
+      data: { [balanceField]: { increment: amount } },
     });
 
-    if (!user) {
-      return {
-        success: false,
-        error: 'User not found',
-      };
+    if (updateResult.count !== 1) {
+      const userExists = await tx.user.findUnique({ where: { id: params.userId }, select: { id: true } });
+      if (!userExists) {
+        return { success: false, error: 'User not found' };
+      }
+      return { success: false, error: 'Insufficient balance' };
     }
 
-    const balanceBefore = Number(balanceField === 'balance' ? user.balance : user.playBalance);
-
-    // Check minimum balance requirement (for deductions)
-    const requiredBalance = minBalance !== undefined ? minBalance : -amount;
-    if (amount < 0 && balanceBefore < requiredBalance) {
-      return {
-        success: false,
-        error: 'Insufficient balance',
-      };
-    }
-
-    // Use updateMany for atomic conditional update
-    const updateResult = await prismaClient.user.updateMany({
-      where: {
-        id: userId,
-        [balanceField]: { gte: requiredBalance },
-      },
-      data: {
-        [balanceField]: { increment: amount },
-      },
+    const userAfter = await tx.user.findUnique({
+      where: { id: params.userId },
+      select: { [balanceField]: true },
     });
-
-    if (updateResult.count === 0) {
-      return {
-        success: false,
-        error: 'Insufficient balance',
-      };
+    if (!userAfter) {
+      return { success: false, error: 'User not found' };
     }
 
-    const balanceAfter = balanceBefore + amount;
+    const balanceAfterCents = toCents(Number((userAfter as any)[balanceField]));
+    const balanceBeforeCents = balanceAfterCents - amountCents;
+    const balanceBefore = centsToNumber(balanceBeforeCents);
+    const balanceAfter = centsToNumber(balanceAfterCents);
 
-    // Record transaction (only for real balance)
     let transactionId: string | undefined;
     if (!isPlayMode) {
-      const transaction = await prismaClient.transaction.create({
+      const transaction = await tx.transaction.create({
         data: {
-          userId,
-          type,
+          userId: params.userId,
+          type: params.type,
           amount,
           balanceBefore,
           balanceAfter,
           relatedBetId,
-          remark: remark || this.buildRemark(type, relatedBetId),
+          remark: remark || this.buildRemark(params.type, relatedBetId),
           orderNo,
           tradeNo,
           status: 'COMPLETED',
@@ -351,14 +402,139 @@ export class FinancialService {
       transactionId = transaction.id;
     }
 
-    return {
-      success: true,
-      result: {
+    return { success: true, result: { balanceBefore, balanceAfter, transactionId } };
+  }
+
+  /**
+   * Complete a pending recharge order atomically (idempotent).
+   *
+   * The order is created as a PENDING Transaction earlier (by orderNo).
+   * This method credits the user's balance and updates the existing transaction record
+   * to COMPLETED with accurate balanceBefore/After.
+   */
+  async completeRechargeOrder(
+    params: { orderNo: string; tradeNo: string; amount: number },
+    tx?: Prisma.TransactionClient
+  ): Promise<{ processed: boolean; balanceBefore?: number; balanceAfter?: number }> {
+    const orderNo = normalizeOptionalString(params.orderNo);
+    const tradeNo = normalizeOptionalString(params.tradeNo);
+    const amount = roundMoney(params.amount);
+
+    if (!orderNo) throw new Error('orderNo is required');
+    if (!tradeNo) throw new Error('tradeNo is required');
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Invalid amount');
+
+    if (tx) {
+      return this.completeRechargeOrderInTx({ orderNo, tradeNo, amount }, tx);
+    }
+
+    try {
+      return await this.prisma.$transaction((innerTx) =>
+        this.completeRechargeOrderInTx({ orderNo, tradeNo, amount }, innerTx)
+      );
+    } catch (error) {
+      if (error instanceof RechargeAlreadyProcessedError) {
+        return { processed: false };
+      }
+      throw error;
+    }
+  }
+
+  private async completeRechargeOrderInTx(
+    params: { orderNo: string; tradeNo: string; amount: number },
+    tx: Prisma.TransactionClient
+  ): Promise<{ processed: boolean; balanceBefore?: number; balanceAfter?: number }> {
+    const order = await tx.transaction.findUnique({ where: { orderNo: params.orderNo } });
+
+    if (!order) {
+      throw new Error(`Order ${params.orderNo} not found`);
+    }
+
+    if (order.type !== 'RECHARGE') {
+      throw new Error(`Order ${params.orderNo} is not a RECHARGE transaction`);
+    }
+
+    // Idempotency fast path
+    if (order.status === 'COMPLETED') {
+      return {
+        processed: false,
+        balanceBefore: Number(order.balanceBefore),
+        balanceAfter: Number(order.balanceAfter),
+      };
+    }
+
+    if (order.status !== 'PENDING') {
+      throw new Error(`Order ${params.orderNo} is not pending`);
+    }
+
+    const expectedAmountCents = toCents(Number(order.amount));
+    const actualAmountCents = toCents(params.amount);
+    if (expectedAmountCents !== actualAmountCents) {
+      throw new Error(`Amount mismatch for order ${params.orderNo}`);
+    }
+
+    let updatedUser: any;
+    try {
+      updatedUser = await tx.user.update({
+        where: { id: order.userId },
+        data: { balance: { increment: params.amount } },
+        select: { balance: true },
+      });
+    } catch (error) {
+      if (isRecordNotFoundError(error)) {
+        throw new Error(`User ${order.userId} not found`);
+      }
+      throw error;
+    }
+
+    const balanceAfterCents = toCents(Number(updatedUser.balance));
+    const balanceBeforeCents = balanceAfterCents - actualAmountCents;
+    const balanceBefore = centsToNumber(balanceBeforeCents);
+    const balanceAfter = centsToNumber(balanceAfterCents);
+
+    const updated = await tx.transaction.updateMany({
+      where: { orderNo: params.orderNo, status: 'PENDING' },
+      data: {
+        status: 'COMPLETED',
+        tradeNo: params.tradeNo,
         balanceBefore,
         balanceAfter,
-        transactionId,
+        completedAt: new Date(),
       },
+    });
+
+    if (updated.count !== 1) {
+      throw new RechargeAlreadyProcessedError(params.orderNo);
+    }
+
+    return { processed: true, balanceBefore, balanceAfter };
+  }
+
+  /**
+   * Set play balance to an absolute value (no ledger entry).
+   */
+  async setPlayBalance(userId: string, newPlayBalance: number, tx?: Prisma.TransactionClient): Promise<number> {
+    if (userId.startsWith('anon-')) return 0;
+    const playBalance = roundMoney(newPlayBalance);
+
+    const runner = async (prismaClient: Prisma.TransactionClient) => {
+      try {
+        const updatedUser = await prismaClient.user.update({
+          where: { id: userId },
+          data: { playBalance },
+          select: { playBalance: true },
+        });
+        return Number(updatedUser.playBalance);
+      } catch (error) {
+        if (isRecordNotFoundError(error)) {
+          throw new Error(`User ${userId} not found`);
+        }
+        throw error;
+      }
     };
+
+    if (tx) return runner(tx);
+    return this.prisma.$transaction(runner);
   }
 
   /**
@@ -467,4 +643,11 @@ export class FinancialService {
  */
 export function createFinancialService(prisma: PrismaClient): FinancialService {
   return new FinancialService(prisma);
+}
+
+class RechargeAlreadyProcessedError extends Error {
+  override name = 'RechargeAlreadyProcessedError';
+  constructor(orderNo: string) {
+    super(`Recharge order already processed: ${orderNo}`);
+  }
 }
