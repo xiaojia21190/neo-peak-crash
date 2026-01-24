@@ -14,6 +14,10 @@ export const MISS_TIME_BUFFER = 0.6;        // 未命中判定缓冲（秒）
 export const PRICE_STALE_THRESHOLD = 5000;      // 价格过期阈值（毫秒）
 export const PRICE_CRITICAL_THRESHOLD = 10000;  // 价格严重过期阈值（毫秒）
 
+// 风控相关
+// <= 1 表示按资金池比例，> 1 表示绝对额度
+export const MAX_ROUND_PAYOUT = Number(process.env.MAX_ROUND_PAYOUT ?? '0.15');
+
 // 默认配置
 export const DEFAULT_ROUND_CONFIG = {
   asset: 'BTCUSDT',
@@ -75,6 +79,8 @@ export const ERROR_CODES = {
   INSUFFICIENT_BALANCE: 'INSUFFICIENT_BALANCE',
   DUPLICATE_BET: 'DUPLICATE_BET',
   USER_NOT_FOUND: 'USER_NOT_FOUND',
+  USER_BANNED: 'USER_BANNED',
+  USER_SILENCED: 'USER_SILENCED',
   ROUND_NOT_FOUND: 'ROUND_NOT_FOUND',
   PRICE_UNAVAILABLE: 'PRICE_UNAVAILABLE',
   INTERNAL_ERROR: 'INTERNAL_ERROR',

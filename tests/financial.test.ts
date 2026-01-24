@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FinancialService } from '../lib/services/financial';
+import type { FinancialOperationType } from '../lib/services/financial';
 
 function toCents(amount: number): number {
   return Math.round(Math.abs(amount) * 100) * Math.sign(amount);
@@ -12,6 +13,20 @@ function fromCents(cents: number): number {
 
 async function microYield(): Promise<void> {
   await Promise.resolve();
+}
+
+async function withMaxFinancialAmount<T>(limit: string, fn: () => Promise<T>): Promise<T> {
+  const original = process.env.MAX_FINANCIAL_AMOUNT;
+  process.env.MAX_FINANCIAL_AMOUNT = limit;
+  try {
+    return await fn();
+  } finally {
+    if (original === undefined) {
+      delete process.env.MAX_FINANCIAL_AMOUNT;
+    } else {
+      process.env.MAX_FINANCIAL_AMOUNT = original;
+    }
+  }
 }
 
 class Mutex {
@@ -73,12 +88,19 @@ class FakePrisma {
     });
   }
 
-  seedRechargeOrder(params: { id?: string; orderNo: string; userId: string; amount: number; status?: string }) {
+  seedRechargeOrder(params: {
+    id?: string;
+    orderNo: string;
+    userId: string;
+    amount: number;
+    status?: string;
+    type?: string;
+  }) {
     const id = params.id ?? this.newTransactionId();
     const row: TransactionRow = {
       id,
       userId: params.userId,
-      type: 'RECHARGE',
+      type: params.type ?? 'RECHARGE',
       amount: params.amount,
       status: params.status ?? 'PENDING',
       balanceBefore: 0,
@@ -469,6 +491,101 @@ test('FinancialService.changeBalance: anonymous user rules', async () => {
       }),
     /Anonymous users can only use play mode/
   );
+});
+
+test('FinancialService.changeBalance: rejects invalid amounts', async () => {
+  const prisma = new FakePrisma();
+  prisma.seedUser('user-1', 500, 0);
+
+  await withMaxFinancialAmount('100', async () => {
+    const service = new FinancialService(prisma as any);
+    const cases: Array<{ amount: number; type: FinancialOperationType; message: RegExp }> = [
+      { amount: Number.NaN, type: 'WIN', message: /finite/i },
+      { amount: Number.POSITIVE_INFINITY, type: 'WIN', message: /finite/i },
+      { amount: 0, type: 'WIN', message: /non-zero/i },
+      { amount: 10, type: 'BET', message: /negative for BET/i },
+      { amount: -10, type: 'WIN', message: /positive for WIN/i },
+      { amount: 200, type: 'WIN', message: /max limit/i },
+    ];
+
+    for (const testCase of cases) {
+      await assert.rejects(
+        () =>
+          service.changeBalance({
+            userId: 'user-1',
+            amount: testCase.amount,
+            type: testCase.type,
+            isPlayMode: false,
+          }),
+        testCase.message
+      );
+    }
+  });
+});
+
+test('FinancialService.batchChangeBalance: rejects invalid change entries', async () => {
+  const prisma = new FakePrisma();
+  prisma.seedUser('user-1', 100, 0);
+
+  await withMaxFinancialAmount('100', async () => {
+    const service = new FinancialService(prisma as any);
+
+    await assert.rejects(
+      () =>
+        service.batchChangeBalance({
+          userId: 'user-1',
+          isPlayMode: false,
+          changes: [{ amount: 0, type: 'WIN' }],
+        }),
+      /non-zero/i
+    );
+
+    await assert.rejects(
+      () =>
+        service.batchChangeBalance({
+          userId: 'user-1',
+          isPlayMode: false,
+          changes: [{ amount: 10, type: 'BET' }],
+        }),
+      /negative for BET/i
+    );
+  });
+});
+
+test('FinancialService.conditionalChangeBalance: rejects invalid amounts', async () => {
+  const prisma = new FakePrisma();
+  prisma.seedUser('user-1', 100, 0);
+
+  await withMaxFinancialAmount('100', async () => {
+    const service = new FinancialService(prisma as any);
+
+    const nanResult = await service.conditionalChangeBalance({
+      userId: 'user-1',
+      amount: Number.NaN,
+      type: 'WIN',
+      isPlayMode: false,
+    });
+    assert.equal(nanResult.success, false);
+    assert.match(nanResult.error ?? '', /finite/i);
+
+    const signResult = await service.conditionalChangeBalance({
+      userId: 'user-1',
+      amount: 10,
+      type: 'BET',
+      isPlayMode: false,
+    });
+    assert.equal(signResult.success, false);
+    assert.match(signResult.error ?? '', /negative for BET/i);
+
+    const limitResult = await service.conditionalChangeBalance({
+      userId: 'user-1',
+      amount: 200,
+      type: 'WIN',
+      isPlayMode: false,
+    });
+    assert.equal(limitResult.success, false);
+    assert.match(limitResult.error ?? '', /max limit/i);
+  });
 });
 
 test('FinancialService.conditionalChangeBalance: enforces sufficient balance', async () => {

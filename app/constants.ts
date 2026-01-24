@@ -12,7 +12,7 @@ export const COUNTDOWN_TIME = 2; // Reduced from 5s to 2s for snappier gameplay
 export const CHART_FPS = 60;
 export const MULTIPLIER_STEP = 0.0006; // Growth rate control
 export const MIN_BET = 1;
-export const MAX_BET = 2000;
+export const MAX_BET = 1000;
 
 // Deprecated but kept for type safety if needed temporarily
 export const GRID_MULTIPLIERS = [];

@@ -15,7 +15,7 @@
 
 import { Prisma } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
-import { roundMoney } from '../shared/gameMath';
+import { roundMoney, toNumber } from '../shared/gameMath';
 
 export type FinancialOperationType =
   | 'RECHARGE'   // User deposits funds
@@ -23,6 +23,10 @@ export type FinancialOperationType =
   | 'BET'        // Deduct bet amount
   | 'WIN'        // Credit winnings
   | 'REFUND';    // Refund bet amount
+
+const DEFAULT_MAX_FINANCIAL_AMOUNT = 1_000_000;
+const POSITIVE_OPERATION_TYPES: FinancialOperationType[] = ['RECHARGE', 'WIN', 'REFUND'];
+const NEGATIVE_OPERATION_TYPES: FinancialOperationType[] = ['BET', 'WITHDRAW'];
 
 export interface BalanceChangeParams {
   userId: string;
@@ -92,7 +96,43 @@ function isRecordNotFoundError(error: unknown): boolean {
  * It ensures data consistency and provides a clear audit trail.
  */
 export class FinancialService {
-  constructor(private prisma: PrismaClient) {}
+  private readonly maxAmountLimit: number;
+
+  constructor(private prisma: PrismaClient) {
+    this.maxAmountLimit = FinancialService.resolveMaxAmountLimit();
+  }
+
+  private static resolveMaxAmountLimit(): number {
+    const raw = process.env.MAX_FINANCIAL_AMOUNT;
+    const parsed = raw ? Number(raw) : DEFAULT_MAX_FINANCIAL_AMOUNT;
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return DEFAULT_MAX_FINANCIAL_AMOUNT;
+  }
+
+  private normalizeAmount(params: BalanceChangeParams): number {
+    if (!Number.isFinite(params.amount)) {
+      throw new Error('Amount must be a finite number');
+    }
+
+    const amount = roundMoney(params.amount);
+    if (amount === 0) {
+      throw new Error('Amount must be non-zero');
+    }
+
+    if (Math.abs(amount) > this.maxAmountLimit) {
+      throw new Error(`Amount exceeds max limit of ${this.maxAmountLimit}`);
+    }
+
+    if (amount > 0 && !POSITIVE_OPERATION_TYPES.includes(params.type)) {
+      throw new Error(`Amount must be negative for ${params.type}`);
+    }
+
+    if (amount < 0 && !NEGATIVE_OPERATION_TYPES.includes(params.type)) {
+      throw new Error(`Amount must be positive for ${params.type}`);
+    }
+
+    return amount;
+  }
 
   /**
    * Change user balance with automatic ledger recording
@@ -112,6 +152,8 @@ export class FinancialService {
     tx?: Prisma.TransactionClient
   ): Promise<BalanceChangeResult> {
     const isPlayMode = params.isPlayMode ?? false;
+    const amount = this.normalizeAmount(params);
+    const normalizedParams = { ...params, amount };
 
     // Anonymous users only support play mode
     const isAnonymous = params.userId.startsWith('anon-');
@@ -125,10 +167,10 @@ export class FinancialService {
     }
 
     if (tx) {
-      return this.changeBalanceInTx(params, tx);
+      return this.changeBalanceInTx(normalizedParams, tx);
     }
 
-    return this.prisma.$transaction((innerTx) => this.changeBalanceInTx(params, innerTx));
+    return this.prisma.$transaction((innerTx) => this.changeBalanceInTx(normalizedParams, innerTx));
   }
 
   private async changeBalanceInTx(
@@ -138,29 +180,55 @@ export class FinancialService {
     const isPlayMode = params.isPlayMode ?? false;
     const balanceField = isPlayMode ? 'playBalance' : 'balance';
 
-    const amount = roundMoney(params.amount);
+    const amount = params.amount;
     const amountCents = toCents(amount);
     const relatedBetId = normalizeOptionalString(params.relatedBetId);
     const remark = normalizeOptionalString(params.remark);
     const orderNo = normalizeOptionalString(params.orderNo);
     const tradeNo = normalizeOptionalString(params.tradeNo);
 
-    // Single statement update (row-locked) + use resulting value to derive before/after.
     let updatedUser: any;
-    try {
-      updatedUser = await tx.user.update({
-        where: { id: params.userId },
+    if (amount < 0) {
+      const requiredBalance = roundMoney(-amount);
+      const updateResult = await tx.user.updateMany({
+        where: { id: params.userId, [balanceField]: { gte: requiredBalance } },
         data: { [balanceField]: { increment: amount } },
+      });
+
+      if (updateResult.count !== 1) {
+        const userExists = await tx.user.findUnique({
+          where: { id: params.userId },
+          select: { id: true },
+        });
+        if (!userExists) {
+          throw new Error(`User ${params.userId} not found`);
+        }
+        throw new Error('Insufficient balance');
+      }
+
+      updatedUser = await tx.user.findUnique({
+        where: { id: params.userId },
         select: { [balanceField]: true },
       });
-    } catch (error) {
-      if (isRecordNotFoundError(error)) {
+      if (!updatedUser) {
         throw new Error(`User ${params.userId} not found`);
       }
-      throw error;
+    } else {
+      try {
+        updatedUser = await tx.user.update({
+          where: { id: params.userId },
+          data: { [balanceField]: { increment: amount } },
+          select: { [balanceField]: true },
+        });
+      } catch (error) {
+        if (isRecordNotFoundError(error)) {
+          throw new Error(`User ${params.userId} not found`);
+        }
+        throw error;
+      }
     }
 
-    const balanceAfterCents = toCents(Number(updatedUser[balanceField]));
+    const balanceAfterCents = toCents(toNumber(updatedUser[balanceField], 0));
     const balanceBeforeCents = balanceAfterCents - amountCents;
 
     const balanceBefore = centsToNumber(balanceBeforeCents);
@@ -210,6 +278,18 @@ export class FinancialService {
     tx?: Prisma.TransactionClient
   ): Promise<BatchBalanceChangeResult> {
     const isPlayMode = params.isPlayMode ?? false;
+    const normalizedChanges = params.changes.map((change) => ({
+      ...change,
+      amount: this.normalizeAmount({
+        userId: params.userId,
+        amount: change.amount,
+        type: change.type,
+        isPlayMode: params.isPlayMode,
+        relatedBetId: change.relatedBetId,
+        remark: change.remark,
+      }),
+    }));
+    const normalizedParams = { ...params, changes: normalizedChanges };
 
     // Anonymous users in play mode skip database
     const isAnonymous = params.userId.startsWith('anon-');
@@ -221,10 +301,10 @@ export class FinancialService {
     }
 
     if (tx) {
-      return this.batchChangeBalanceInTx(params, tx);
+      return this.batchChangeBalanceInTx(normalizedParams, tx);
     }
 
-    return this.prisma.$transaction((innerTx) => this.batchChangeBalanceInTx(params, innerTx));
+    return this.prisma.$transaction((innerTx) => this.batchChangeBalanceInTx(normalizedParams, innerTx));
   }
 
   private async batchChangeBalanceInTx(
@@ -236,7 +316,7 @@ export class FinancialService {
 
     const normalizedChanges = params.changes.map((change) => ({
       ...change,
-      amount: roundMoney(change.amount),
+      amount: change.amount,
       relatedBetId: normalizeOptionalString(change.relatedBetId),
       remark: normalizeOptionalString(change.remark),
     }));
@@ -258,7 +338,7 @@ export class FinancialService {
       throw error;
     }
 
-    const balanceAfterCents = toCents(Number(updatedUser[balanceField]));
+    const balanceAfterCents = toCents(toNumber(updatedUser[balanceField], 0));
     const balanceBeforeCents = balanceAfterCents - totalChangeCents;
 
     const balanceBefore = centsToNumber(balanceBeforeCents);
@@ -311,6 +391,12 @@ export class FinancialService {
     tx?: Prisma.TransactionClient
   ): Promise<{ success: boolean; result?: BalanceChangeResult; error?: string }> {
     const isPlayMode = params.isPlayMode ?? false;
+    let amount: number;
+    try {
+      amount = this.normalizeAmount(params);
+    } catch (error) {
+      return { success: false, error: (error as Error).message || 'Invalid amount' };
+    }
 
     // Anonymous users in play mode always succeed
     const isAnonymous = params.userId.startsWith('anon-');
@@ -321,7 +407,6 @@ export class FinancialService {
       return { success: false, error: 'Anonymous users can only use play mode' };
     }
 
-    const amount = roundMoney(params.amount);
     if (amount >= 0) {
       try {
         const result = tx
@@ -348,7 +433,7 @@ export class FinancialService {
     const isPlayMode = params.isPlayMode ?? false;
     const balanceField = isPlayMode ? 'playBalance' : 'balance';
 
-    const amount = roundMoney(params.amount);
+    const amount = params.amount;
     const amountCents = toCents(amount);
     const requiredBalance = roundMoney(params.minBalance !== undefined ? params.minBalance : -amount);
     const relatedBetId = normalizeOptionalString(params.relatedBetId);
@@ -377,7 +462,7 @@ export class FinancialService {
       return { success: false, error: 'User not found' };
     }
 
-    const balanceAfterCents = toCents(Number((userAfter as any)[balanceField]));
+    const balanceAfterCents = toCents(toNumber((userAfter as any)[balanceField], 0));
     const balanceBeforeCents = balanceAfterCents - amountCents;
     const balanceBefore = centsToNumber(balanceBeforeCents);
     const balanceAfter = centsToNumber(balanceAfterCents);
@@ -458,8 +543,8 @@ export class FinancialService {
     if (order.status === 'COMPLETED') {
       return {
         processed: false,
-        balanceBefore: Number(order.balanceBefore),
-        balanceAfter: Number(order.balanceAfter),
+        balanceBefore: toNumber(order.balanceBefore, 0),
+        balanceAfter: toNumber(order.balanceAfter, 0),
       };
     }
 
@@ -467,7 +552,7 @@ export class FinancialService {
       throw new Error(`Order ${params.orderNo} is not pending`);
     }
 
-    const expectedAmountCents = toCents(Number(order.amount));
+    const expectedAmountCents = toCents(toNumber(order.amount, 0));
     const actualAmountCents = toCents(params.amount);
     if (expectedAmountCents !== actualAmountCents) {
       throw new Error(`Amount mismatch for order ${params.orderNo}`);
@@ -487,7 +572,7 @@ export class FinancialService {
       throw error;
     }
 
-    const balanceAfterCents = toCents(Number(updatedUser.balance));
+    const balanceAfterCents = toCents(toNumber(updatedUser.balance, 0));
     const balanceBeforeCents = balanceAfterCents - actualAmountCents;
     const balanceBefore = centsToNumber(balanceBeforeCents);
     const balanceAfter = centsToNumber(balanceAfterCents);
@@ -524,7 +609,7 @@ export class FinancialService {
           data: { playBalance },
           select: { playBalance: true },
         });
-        return Number(updatedUser.playBalance);
+        return toNumber(updatedUser.playBalance, 0);
       } catch (error) {
         if (isRecordNotFoundError(error)) {
           throw new Error(`User ${userId} not found`);
@@ -560,8 +645,8 @@ export class FinancialService {
     if (!user) return null;
 
     return {
-      balance: Number(user.balance),
-      playBalance: Number(user.playBalance),
+      balance: toNumber(user.balance, 0),
+      playBalance: toNumber(user.playBalance, 0),
     };
   }
 

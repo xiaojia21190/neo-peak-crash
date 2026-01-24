@@ -9,6 +9,7 @@ import type { PrismaClient } from '@prisma/client';
 import { WS_EVENTS, ERROR_CODES } from './constants';
 import type { PlaceBetRequest, GameStateSnapshot, StateSnapshotMessage, UserStateSnapshot } from './types';
 import { GameError } from './errors';
+import { toNumber } from '../shared/gameMath';
 
 export interface WSGatewayConfig {
   cors?: {
@@ -349,8 +350,8 @@ export class WebSocketGateway {
         currentRow: 6.5,
         elapsed: 0,
         startTime: 0,
-        bettingDuration: this.toNumber(config.bettingDuration, 5),
-        maxDuration: this.toNumber(config.maxDuration, 60),
+        bettingDuration: toNumber(config.bettingDuration, 5),
+        maxDuration: toNumber(config.maxDuration, 60),
       };
     }
 
@@ -358,13 +359,13 @@ export class WebSocketGateway {
       roundId: state.roundId ?? null,
       status: state.status ?? null,
       asset: state.asset ?? config.asset ?? 'BTCUSDT',
-      startPrice: this.toNumber(state.startPrice, 0),
-      currentPrice: this.toNumber(state.currentPrice, 0),
-      currentRow: this.toNumber(state.currentRow, 6.5),
-      elapsed: this.toNumber(state.elapsed, 0),
-      startTime: this.toNumber(state.roundStartTime, 0),
-      bettingDuration: this.toNumber(config.bettingDuration, 5),
-      maxDuration: this.toNumber(config.maxDuration, 60),
+      startPrice: toNumber(state.startPrice, 0),
+      currentPrice: toNumber(state.currentPrice, 0),
+      currentRow: toNumber(state.currentRow, 6.5),
+      elapsed: toNumber(state.elapsed, 0),
+      startTime: toNumber(state.roundStartTime, 0),
+      bettingDuration: toNumber(config.bettingDuration, 5),
+      maxDuration: toNumber(config.maxDuration, 60),
     };
   }
 
@@ -378,8 +379,8 @@ export class WebSocketGateway {
     });
 
     const snapshot: UserStateSnapshot = {
-      balance: this.toNumber(user?.balance, 0),
-      playBalance: this.toNumber(user?.playBalance, 0),
+      balance: toNumber(user?.balance, 0),
+      playBalance: toNumber(user?.playBalance, 0),
       recentBets: [],
     };
 
@@ -422,23 +423,23 @@ export class WebSocketGateway {
         betId: bet.id,
         orderId: bet.orderId ?? null,
         roundId: bet.roundId ?? null,
-        amount: this.toNumber(bet.amount, 0),
-        multiplier: this.toNumber(bet.multiplier, 0),
-        targetRow: targetRow != null ? this.toNumber(targetRow, 0) : null,
-        targetTime: targetTime != null ? this.toNumber(targetTime, 0) : null,
+        amount: toNumber(bet.amount, 0),
+        multiplier: toNumber(bet.multiplier, 0),
+        targetRow: targetRow != null ? toNumber(targetRow, 0) : null,
+        targetTime: targetTime != null ? toNumber(targetTime, 0) : null,
         status: bet.status,
         isWin: Boolean(bet.isWin),
-        payout: this.toNumber(bet.payout, 0),
+        payout: toNumber(bet.payout, 0),
         isPlayMode: Boolean(bet.isPlayMode),
         hitDetails: hasHitDetails
           ? {
-              hitPrice: this.toNumber(bet.hitPrice, 0),
-              hitRow: this.toNumber(bet.hitRow, 0),
-              hitTime: this.toNumber(bet.hitTime, 0),
+              hitPrice: toNumber(bet.hitPrice, 0),
+              hitRow: toNumber(bet.hitRow, 0),
+              hitTime: toNumber(bet.hitTime, 0),
             }
           : undefined,
-        createdAt: bet.createdAt instanceof Date ? bet.createdAt.getTime() : this.toNumber(bet.createdAt, 0),
-        settledAt: bet.settledAt instanceof Date ? bet.settledAt.getTime() : bet.settledAt == null ? null : this.toNumber(bet.settledAt, 0),
+        createdAt: bet.createdAt instanceof Date ? bet.createdAt.getTime() : toNumber(bet.createdAt, 0),
+        settledAt: bet.settledAt instanceof Date ? bet.settledAt.getTime() : bet.settledAt == null ? null : toNumber(bet.settledAt, 0),
       };
     });
 
@@ -514,10 +515,10 @@ export class WebSocketGateway {
         payload: {
           orderId: bet.orderId,
           betId: bet.id,
-          multiplier: this.toNumber(bet.multiplier, 0),
-          targetRow: this.toNumber(targetRow, 0),
-          targetTime: this.toNumber(targetTime, 0),
-          amount: this.toNumber(bet.amount, 0),
+          multiplier: toNumber(bet.multiplier, 0),
+          targetRow: toNumber(targetRow, 0),
+          targetTime: toNumber(targetTime, 0),
+          amount: toNumber(bet.amount, 0),
         },
         timestamp: Date.now(),
       });
@@ -530,12 +531,12 @@ export class WebSocketGateway {
             betId: bet.id,
             orderId: bet.orderId,
             isWin: bet.status === 'WON',
-            payout: this.toNumber(bet.payout, 0),
+            payout: toNumber(bet.payout, 0),
             hitDetails: hasHitDetails
               ? {
-                  hitPrice: this.toNumber(bet.hitPrice, 0),
-                  hitRow: this.toNumber(bet.hitRow, 0),
-                  hitTime: this.toNumber(bet.hitTime, 0),
+                  hitPrice: toNumber(bet.hitPrice, 0),
+                  hitRow: toNumber(bet.hitRow, 0),
+                  hitTime: toNumber(bet.hitTime, 0),
                 }
               : undefined,
           },
@@ -550,7 +551,7 @@ export class WebSocketGateway {
             betId: bet.id,
             orderId: bet.orderId,
             userId,
-            amount: this.toNumber(bet.amount, 0),
+            amount: toNumber(bet.amount, 0),
             reason: 'reconnect_sync',
           },
           timestamp: Date.now(),
@@ -559,25 +560,6 @@ export class WebSocketGateway {
     }
   }
 
-  private toNumber(value: unknown, fallback: number): number {
-    if (value == null) return fallback;
-    if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
-    if (typeof value === 'string') {
-      const parsed = Number.parseFloat(value);
-      return Number.isFinite(parsed) ? parsed : fallback;
-    }
-    const maybeToNumber = (value as any)?.toNumber;
-    if (typeof maybeToNumber === 'function') {
-      try {
-        const num = maybeToNumber.call(value);
-        return Number.isFinite(num) ? num : fallback;
-      } catch {
-        return fallback;
-      }
-    }
-    const coerced = Number(value);
-    return Number.isFinite(coerced) ? coerced : fallback;
-  }
 
   /**
    * 设置 GameEngine 事件监听

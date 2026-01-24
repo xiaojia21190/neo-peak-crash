@@ -13,3 +13,5 @@ export { WebSocketGateway } from './WebSocketGateway';
 export type { WSGatewayConfig, AuthenticatedSocket } from './WebSocketGateway';
 export { GameClient } from './GameClient';
 export type { ClientGameState, ClientBet, GameClientConfig } from './GameClient';
+export { RiskManager } from './RiskManager';
+export type { RiskAssessment, RiskBet, RiskMetrics } from './RiskManager';

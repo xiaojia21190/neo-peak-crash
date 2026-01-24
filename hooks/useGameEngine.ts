@@ -256,7 +256,7 @@ export function useGameEngine(options: UseGameEngineOptions = {}): UseGameEngine
   );
 
   const canBet = useMemo(
-    () => connected && (state?.status === 'BETTING' || state?.status === 'RUNNING'),
+    () => connected && state?.status === 'BETTING',
     [connected, state?.status]
   );
 

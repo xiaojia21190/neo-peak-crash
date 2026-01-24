@@ -72,6 +72,15 @@ model Round {
   @@map("rounds")
 }
 
+model HousePool {
+  asset     String   @id
+  balance   Decimal  @db.Decimal(18, 2)
+  version   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@map("house_pools")
+}
+
 // 价格快照（时序数据）
 model PriceSnapshot {
   id      String @id @default(cuid())

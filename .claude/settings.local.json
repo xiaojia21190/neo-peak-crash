@@ -60,7 +60,8 @@
       "Bash(do if grep -q \"SESSION_ID\" \"C:\\\\Users\\\\35033\\\\AppData\\\\Local\\\\Temp\\\\codeagent-wrapper-74000-$task.log\")",
       "Bash(then echo \"$task: COMPLETED\")",
       "Bash(else echo \"$task: Still running\")",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(pnpm test)"
     ]
   }
 }
