@@ -52,6 +52,21 @@ const defaultTargets = ['tests/*.test.ts', '__tests__/**/*.test.ts'];
 const normalizeTarget = (target) => target.replace(/\\/g, '/');
 const mapTargetToTests = (target) => {
   const normalized = normalizeTarget(target);
+  // If users pass a __tests__ directory, expand it to the test glob. Node's test runner
+  // (with tsx loader) does not reliably accept directories as entrypoints.
+  if (normalized.startsWith('__tests__/') || normalized.startsWith('tests/')) {
+    const trimmed = normalized.replace(/\/+$/, '');
+    const isDir =
+      normalized.endsWith('/') ||
+      normalized.endsWith('\\') ||
+      (existsSync(trimmed) && statSync(trimmed).isDirectory());
+
+    if (isDir) {
+      return `${trimmed}/**/*.test.ts`;
+    }
+
+    return target;
+  }
   if (!normalized.startsWith('lib/')) return target;
 
   const trimmed = normalized.replace(/\/+$/, '');
@@ -79,17 +94,28 @@ if (testTargets.length > 0) {
     resolvedTargets.push('tests/financial.test.ts');
     coverageIncludes.push('lib/services/financial.ts');
   }
-  if (testTargets.some((target) => normalizeTarget(target) === 'lib/game-engine/')) {
+  const normalizedTargets = testTargets.map((target) => normalizeTarget(target).replace(/\/+$/, ''));
+  if (normalizedTargets.some((target) => target === 'lib/game-engine' || target === '__tests__/lib/game-engine')) {
     coverageIncludes.push(
       'lib/game-engine/GameEngine.ts',
       'lib/game-engine/SettlementService.ts',
       'lib/game-engine/SnapshotService.ts',
       'lib/game-engine/LockManager.ts'
     );
+    // These are exercised by game-engine tests (including payment notify and ws gateway regression tests).
+    coverageIncludes.push('app/api/payment/notify/route.ts');
   }
   for (const target of testTargets) {
     const normalized = normalizeTarget(target);
-    if (normalized.endsWith('.ts')) {
+    // When passing a test file under __tests__/lib/**, include the corresponding source file for coverage.
+    if (normalized.startsWith('__tests__/lib/') && normalized.endsWith('.test.ts')) {
+      coverageIncludes.push(normalized.replace(/^__tests__\//, '').replace(/\.test\.ts$/, '.ts'));
+      continue;
+    }
+    if (
+      normalized.endsWith('.ts') &&
+      (normalized.startsWith('lib/') || normalized.startsWith('app/') || normalized.startsWith('server/'))
+    ) {
       coverageIncludes.push(normalized);
     }
   }

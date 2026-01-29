@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { GameEngine } from '../../../lib/game-engine/GameEngine';
 import { ERROR_CODES, REDIS_KEYS } from '../../../lib/game-engine/constants';
+import { RiskManager } from '../../../lib/game-engine/RiskManager';
 import type { PriceUpdate, ServerBet, SettlementItem } from '../../../lib/game-engine/types';
 import { GameError } from '../../../lib/game-engine/errors';
 import { resetInMemoryRateLimit } from '../../../lib/services/rateLimit';
 
 class FakeRedis {
   hashes = new Map<string, Record<string, string>>();
+  strings = new Map<string, string>();
   dels: string[] = [];
   zadds: Array<{ key: string; score: number; member: string }> = [];
 
@@ -17,9 +19,56 @@ class FakeRedis {
     return 1;
   }
 
+  async get(key: string) {
+    return this.strings.has(key) ? this.strings.get(key)! : null;
+  }
+
   async del(key: string) {
     this.dels.push(key);
+    this.hashes.delete(key);
+    this.strings.delete(key);
     return 1;
+  }
+
+  async eval(script: string, numKeys: number, ...args: any[]) {
+    if (script.includes('risk:reserve_expected_payout')) {
+      if (numKeys !== 2) throw new Error('Invalid key count');
+      const [reservedKey, reservationKey, maxPayoutRaw, deltaRaw] = args;
+      const maxPayout = Number(maxPayoutRaw);
+      const delta = Number(deltaRaw);
+      const existing = this.strings.get(String(reservationKey));
+      const currentTotal = Number(this.strings.get(String(reservedKey)) ?? 0);
+
+      if (existing != null) {
+        return [1, 0, currentTotal, Number(existing)];
+      }
+
+      if (currentTotal + delta > maxPayout + 1e-6) {
+        return [0, 0, currentTotal, 0];
+      }
+
+      const nextTotal = currentTotal + delta;
+      this.strings.set(String(reservedKey), String(nextTotal));
+      this.strings.set(String(reservationKey), String(delta));
+      return [1, 1, nextTotal, delta];
+    }
+
+    if (script.includes('risk:release_expected_payout')) {
+      if (numKeys !== 2) throw new Error('Invalid key count');
+      const [reservedKey, reservationKey] = args;
+      const existing = this.strings.get(String(reservationKey));
+      const currentTotal = Number(this.strings.get(String(reservedKey)) ?? 0);
+      if (existing == null) {
+        return [0, currentTotal, 0];
+      }
+      const delta = Number(existing);
+      const nextTotal = Math.max(0, currentTotal - delta);
+      this.strings.set(String(reservedKey), String(nextTotal));
+      this.strings.delete(String(reservationKey));
+      return [1, nextTotal, delta];
+    }
+
+    throw new Error('Unsupported eval script');
   }
 
   async zadd(key: string, score: number, member: string) {
@@ -34,6 +83,8 @@ class FakePrisma {
   users = new Map<string, any>();
   betsByOrderId = new Map<string, any>();
   updateCalls: any[] = [];
+  roundUpdateManyError: Error | null = null;
+  betFindManyError: Error | null = null;
   private roundSeq = 0;
   private betSeq = 0;
 
@@ -61,6 +112,8 @@ class FakePrisma {
       targetTime: 2,
       targetRow: 5,
       isPlayMode: false,
+      asset: 'BTCUSDT',
+      createdAt: new Date(),
     };
     this.bets.set(id, bet);
     this.betsByOrderId.set(row.orderId, bet);
@@ -75,6 +128,9 @@ class FakePrisma {
       return round;
     },
     updateMany: async (args: any) => {
+      if (this.roundUpdateManyError) {
+        throw this.roundUpdateManyError;
+      }
       this.updateCalls.push(args);
       const where = args?.where ?? {};
       const data = args?.data ?? {};
@@ -107,12 +163,41 @@ class FakePrisma {
   bet = {
     updateMany: async (args: any) => {
       const id = args?.where?.id as string | undefined;
-      const status = args?.where?.status as string | undefined;
+      const status = args?.where?.status as any;
       const bet = id ? this.bets.get(id) : undefined;
       if (!bet) return { count: 0 };
-      if (status && bet.status !== status) return { count: 0 };
+      if (status) {
+        if (typeof status === 'string' && bet.status !== status) return { count: 0 };
+        if (status.in && !status.in.includes(bet.status)) return { count: 0 };
+      }
       Object.assign(bet, args.data ?? {});
       return { count: 1 };
+    },
+    findMany: async (args: any) => {
+      if (this.betFindManyError) {
+        throw this.betFindManyError;
+      }
+      const where = args?.where ?? {};
+      const roundId = where.roundId as string | undefined;
+      const status = where.status as any;
+      const results = Array.from(this.bets.values()).filter((bet) => {
+        if (roundId && bet.roundId !== roundId) return false;
+        if (status) {
+          if (typeof status === 'string' && bet.status !== status) return false;
+          if (status.in && !status.in.includes(bet.status)) return false;
+        }
+        return true;
+      });
+
+      if (!args.select) return results;
+
+      return results.map((bet) => {
+        const selected: any = {};
+        for (const [key, enabled] of Object.entries(args.select as Record<string, boolean>)) {
+          if (enabled) selected[key] = (bet as any)[key];
+        }
+        return selected;
+      });
     },
     findUnique: async (args: any) => {
       const orderId = args?.where?.orderId as string | undefined;
@@ -241,6 +326,8 @@ class FakeLockManager {
   betReleaseCalls = 0;
   betLockToken: string | null = 'bet-token';
   betReleaseResult = true;
+  betAcquireError: Error | null = null;
+  betReleaseError: Error | null = null;
 
   async acquireRoundLock() {
     this.acquireCalls += 1;
@@ -254,11 +341,17 @@ class FakeLockManager {
 
   async acquireBetLock(_orderId?: string, _ttlMs?: number) {
     this.betAcquireCalls += 1;
+    if (this.betAcquireError) {
+      throw this.betAcquireError;
+    }
     return this.betLockToken;
   }
 
   async releaseBetLock(_orderId?: string, _token?: string) {
     this.betReleaseCalls += 1;
+    if (this.betReleaseError) {
+      throw this.betReleaseError;
+    }
     return this.betReleaseResult;
   }
 }
@@ -507,10 +600,6 @@ test('GameEngine placeBet succeeds for active users', async () => {
   seedBettingState(engine, prisma, 'round-bet-1');
   prisma.seedUser({ id: 'user-1', balance: 250, playBalance: 50 });
 
-  (engine as any).riskManager = {
-    assessBet: () => ({ allowed: true, maxBetAllowed: 100 }),
-  };
-
   const result = await engine.placeBet('user-1', makeValidRequest());
 
   assert.ok(result.betId);
@@ -540,6 +629,27 @@ test('GameEngine placeBet returns existing bet for duplicate orderId', async () 
 
   assert.equal(result.betId, seeded.id);
   assert.equal(lockManager.betAcquireCalls, 0);
+});
+
+test('GameEngine placeBet rehydrates existing pending bets into in-memory state', async () => {
+  const { engine, prisma } = createEngine({
+    asset: 'BTCUSDT',
+    price: 100,
+    timestamp: Date.now(),
+    source: 'bybit',
+  });
+
+  const roundId = seedBettingState(engine, prisma, 'round-bet-rehydrate');
+  prisma.seedUser({ id: 'user-1' });
+
+  const seeded = prisma.seedBet({ orderId: 'order-rehydrate', userId: 'user-1', roundId });
+  assert.equal((engine as any).state.activeBets.size, 0);
+
+  const result = await engine.placeBet('user-1', makeValidRequest({ orderId: 'order-rehydrate' }));
+
+  assert.equal(result.betId, seeded.id);
+  assert.equal((engine as any).state.activeBets.size, 1);
+  assert.ok((engine as any).state.activeBets.has(seeded.id));
 });
 
 test('GameEngine placeBet validates user status', async () => {
@@ -745,10 +855,6 @@ test('GameEngine placeBet is idempotent under concurrent requests', async () => 
   seedBettingState(engine, prisma, 'round-bet-concurrent');
   prisma.seedUser({ id: 'user-1' });
 
-  (engine as any).riskManager = {
-    assessBet: () => ({ allowed: true, maxBetAllowed: 100 }),
-  };
-
   const request = makeValidRequest({ orderId: 'order-concurrent' });
   const [first, second] = await Promise.all([
     engine.placeBet('user-1', request),
@@ -758,6 +864,30 @@ test('GameEngine placeBet is idempotent under concurrent requests', async () => 
   assert.equal(first.betId, second.betId);
   assert.equal(prisma.betsByOrderId.size, 1);
   assert.equal((engine as any).state.activeBets.size, 1);
+});
+
+test('GameEngine placeBet accepts concurrent bets from multiple users', async () => {
+  const { engine, prisma } = createEngine({
+    asset: 'BTCUSDT',
+    price: 100,
+    timestamp: Date.now(),
+    source: 'bybit',
+  });
+
+  seedBettingState(engine, prisma, 'round-bet-multi');
+  prisma.seedUser({ id: 'user-1' });
+  prisma.seedUser({ id: 'user-2' });
+
+  const [first, second] = await Promise.all([
+    engine.placeBet('user-1', makeValidRequest({ orderId: 'order-multi-1' })),
+    engine.placeBet('user-2', makeValidRequest({ orderId: 'order-multi-2' })),
+  ]);
+
+  assert.ok(first.betId);
+  assert.ok(second.betId);
+  assert.notEqual(first.betId, second.betId);
+  assert.equal(prisma.betsByOrderId.size, 2);
+  assert.equal((engine as any).state.activeBets.size, 2);
 });
 
 test('GameEngine placeBet rejects invalid state and orderId', async () => {
@@ -827,14 +957,80 @@ test('GameEngine placeBet respects risk limits', async () => {
   seedBettingState(engine, prisma, 'round-bet-8');
   prisma.seedUser({ id: 'user-1' });
 
-  (engine as any).riskManager = {
-    assessBet: () => ({ allowed: false, maxBetAllowed: 1 }),
-  };
+  (engine as any).riskManager = new RiskManager({ maxRoundPayout: 1 });
 
   await assert.rejects(
     () => engine.placeBet('user-1', makeValidRequest({ orderId: 'order-14' })),
     (err) => err instanceof GameError && err.code === ERROR_CODES.INVALID_AMOUNT
   );
+});
+
+test('GameEngine placeBet reserves expected payout and releases after settlement', async () => {
+  const { engine, prisma, redis } = createEngine({
+    asset: 'BTCUSDT',
+    price: 100,
+    timestamp: Date.now(),
+    source: 'bybit',
+  });
+
+  const roundId = seedBettingState(engine, prisma, 'round-reserve-1');
+  prisma.seedUser({ id: 'user-1' });
+
+  (engine as any).riskManager = new RiskManager({ maxRoundPayout: 100 });
+
+  const result = await engine.placeBet('user-1', makeValidRequest({ orderId: 'order-reserve' }));
+
+  const reservedKey = (engine as any).riskManager.buildReservedExpectedPayoutKey(roundId);
+  const reservationKey = (engine as any).riskManager.buildOrderReservationKey(roundId, 'order-reserve');
+
+  const reservedBefore = Number(await redis.get(reservedKey));
+  assert.ok(reservedBefore > 0);
+  assert.equal(await redis.get(reservationKey), String(reservedBefore));
+
+  await (engine as any).handleBetSettled({
+    betId: result.betId,
+    orderId: 'order-reserve',
+    userId: 'user-1',
+    isWin: false,
+    payout: 0,
+  });
+
+  assert.equal(Number(await redis.get(reservedKey)), 0);
+  assert.equal(await redis.get(reservationKey), null);
+});
+
+test('GameEngine placeBet atomically reserves expected payout across concurrent bets', async () => {
+  const { engine, prisma, redis } = createEngine({
+    asset: 'BTCUSDT',
+    price: 100,
+    timestamp: Date.now(),
+    source: 'bybit',
+  });
+
+  const roundId = seedBettingState(engine, prisma, 'round-atomic-1');
+  prisma.seedUser({ id: 'user-1' });
+
+  (engine as any).riskManager = new RiskManager({ maxRoundPayout: 11 });
+
+  const [first, second] = await Promise.allSettled([
+    engine.placeBet('user-1', makeValidRequest({ orderId: 'order-atomic-1' })),
+    engine.placeBet('user-1', makeValidRequest({ orderId: 'order-atomic-2' })),
+  ]);
+
+  const successes = [first, second].filter((r) => r.status === 'fulfilled');
+  const failures = [first, second].filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 1);
+  assert.ok(failures[0].reason instanceof GameError);
+  assert.equal((failures[0].reason as GameError).code, ERROR_CODES.INVALID_AMOUNT);
+
+  const reservedKey = (engine as any).riskManager.buildReservedExpectedPayoutKey(roundId);
+  const reserved = Number(await redis.get(reservedKey));
+  assert.ok(reserved > 0);
+  assert.ok(reserved <= 11);
+  assert.equal(prisma.betsByOrderId.size, 1);
+  assert.equal((engine as any).state.activeBets.size, 1);
 });
 
 test('GameEngine tick enqueues missed bets and buffers snapshots', () => {
@@ -1112,8 +1308,11 @@ test('GameEngine cancelRound refunds pending bets', async () => {
     isPlayMode: false,
   };
 
-  prisma.bets.set('bet-refund', {
+  prisma.seedBet({
     id: 'bet-refund',
+    orderId: 'order-refund',
+    userId: 'user-1',
+    roundId: 'round-4',
     status: 'PENDING',
   });
 
@@ -1127,6 +1326,57 @@ test('GameEngine cancelRound refunds pending bets', async () => {
     elapsed: 3,
     roundStartTime: Date.now() - 3000,
     activeBets: new Map<string, ServerBet>([['bet-refund', bet]]),
+  };
+
+  await engine.cancelRound('manual');
+
+  assert.equal(bet.status, 'REFUNDED');
+  assert.equal(financialService.changeCalls.length, 1);
+  assert.equal(housePoolService.applyCalls.length, 1);
+  assert.equal(housePoolService.applyCalls[0].amount, -10);
+  assert.equal(lockManager.releaseCalls, 1);
+  assert.equal(engine.getState(), null);
+});
+
+test('GameEngine cancelRound refunds settling bets', async () => {
+  const { engine, prisma, financialService, lockManager, housePoolService } = createEngine({
+    asset: 'BTCUSDT',
+    price: 100,
+    timestamp: Date.now(),
+    source: 'bybit',
+  });
+
+  const bet: ServerBet = {
+    id: 'bet-refund-settling',
+    orderId: 'order-refund-settling',
+    userId: 'user-1',
+    amount: 10,
+    multiplier: 2,
+    targetRow: 3,
+    targetTime: 2,
+    placedAt: Date.now(),
+    status: 'SETTLING',
+    isPlayMode: false,
+  };
+
+  prisma.seedBet({
+    id: 'bet-refund-settling',
+    orderId: 'order-refund-settling',
+    userId: 'user-1',
+    roundId: 'round-settling',
+    status: 'SETTLING',
+  });
+
+  (engine as any).state = {
+    roundId: 'round-settling',
+    status: 'RUNNING',
+    asset: 'BTCUSDT',
+    startPrice: 100,
+    currentPrice: 100,
+    currentRow: 5,
+    elapsed: 3,
+    roundStartTime: Date.now() - 3000,
+    activeBets: new Map<string, ServerBet>([['bet-refund-settling', bet]]),
   };
 
   await engine.cancelRound('manual');

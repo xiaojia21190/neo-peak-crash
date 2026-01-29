@@ -4,13 +4,25 @@
 
 import Redis from 'ioredis';
 
+type RedisConstructor = new (url: string, options?: any) => Redis;
+
+const globalForRedis = globalThis as unknown as {
+  __redisConstructor?: RedisConstructor;
+};
+
+function getRedisConstructor(): RedisConstructor {
+  return globalForRedis.__redisConstructor ?? (Redis as unknown as RedisConstructor);
+}
+
 let redisClient: Redis | null = null;
 
 export function getRedisClient(): Redis {
   if (!redisClient) {
     const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
 
-    redisClient = new Redis(redisUrl, {
+    const RedisImpl = getRedisConstructor();
+
+    redisClient = new RedisImpl(redisUrl, {
       maxRetriesPerRequest: 3,
       retryStrategy(times: number) {
         if (times > 10) {
@@ -65,7 +77,8 @@ let redisSubClient: Redis | null = null;
 export function getRedisPubClient(): Redis {
   if (!redisPubClient) {
     const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-    redisPubClient = new Redis(redisUrl);
+    const RedisImpl = getRedisConstructor();
+    redisPubClient = new RedisImpl(redisUrl);
   }
   return redisPubClient;
 }
@@ -73,7 +86,8 @@ export function getRedisPubClient(): Redis {
 export function getRedisSubClient(): Redis {
   if (!redisSubClient) {
     const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-    redisSubClient = new Redis(redisUrl);
+    const RedisImpl = getRedisConstructor();
+    redisSubClient = new RedisImpl(redisUrl);
   }
   return redisSubClient;
 }

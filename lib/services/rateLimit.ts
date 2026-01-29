@@ -9,9 +9,24 @@ export interface SlidingWindowRateLimitOptions {
   redisEnabled?: boolean;
 }
 
-const inMemoryTimestampsByKey: Map<string, number[]> = new Map();
+const MAX_IN_MEMORY_KEYS = 10000;
+const CLEANUP_INTERVAL_MS = 60000;
+const CLEANUP_BATCH_SIZE = 1000;
+const LAZY_CLEANUP_EVERY_CALLS = 200;
+
+interface InMemoryEntry {
+  timestamps: number[];
+  lastAccess: number;
+  windowMs: number;
+}
+
+const inMemoryStore: Map<string, InMemoryEntry> = new Map();
 let memberSeq = 0;
 const warned: Set<string> = new Set();
+let cleanupTimer: NodeJS.Timeout | null = null;
+let cleanupCursor = 0;
+let lazyCleanupCalls = 0;
+let lastLazyCleanupAt = 0;
 
 function warnOnce(key: string, message: string, error?: unknown): void {
   if (warned.has(key)) return;
@@ -29,26 +44,142 @@ function envBool(name: string, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+function pruneTimestampsInPlace(timestamps: number[], minTs: number): void {
+  if (timestamps.length === 0) return;
+
+  let write = 0;
+  for (let read = 0; read < timestamps.length; read += 1) {
+    const ts = timestamps[read];
+    if (ts > minTs) {
+      timestamps[write] = ts;
+      write += 1;
+    }
+  }
+
+  timestamps.length = write;
+}
+
+function cleanupExpiredEntries(now: number, maxKeysToProcess: number): void {
+  if (inMemoryStore.size === 0) {
+    cleanupCursor = 0;
+    return;
+  }
+
+  const keys = Array.from(inMemoryStore.keys());
+  if (keys.length === 0) {
+    cleanupCursor = 0;
+    return;
+  }
+
+  cleanupCursor %= keys.length;
+  const limit = Math.min(maxKeysToProcess, keys.length);
+
+  for (let i = 0; i < limit; i += 1) {
+    const key = keys[(cleanupCursor + i) % keys.length];
+    if (!key) continue;
+
+    const entry = inMemoryStore.get(key);
+    if (!entry) continue;
+
+    const minTs = now - entry.windowMs;
+    pruneTimestampsInPlace(entry.timestamps, minTs);
+
+    if (entry.timestamps.length === 0) inMemoryStore.delete(key);
+  }
+
+  cleanupCursor = (cleanupCursor + limit) % keys.length;
+}
+
+function evictOldestIfNeeded(): void {
+  const overflow = inMemoryStore.size - MAX_IN_MEMORY_KEYS;
+  if (overflow <= 0) return;
+
+  if (overflow === 1) {
+    let oldestKey: string | null = null;
+    let oldestAccess = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of inMemoryStore.entries()) {
+      if (entry.lastAccess < oldestAccess) {
+        oldestAccess = entry.lastAccess;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey) inMemoryStore.delete(oldestKey);
+    return;
+  }
+
+  const entries: Array<{ key: string; lastAccess: number }> = [];
+  for (const [key, entry] of inMemoryStore.entries()) {
+    entries.push({ key, lastAccess: entry.lastAccess });
+  }
+  entries.sort((a, b) => a.lastAccess - b.lastAccess);
+  for (let i = 0; i < overflow && i < entries.length; i += 1) {
+    inMemoryStore.delete(entries[i].key);
+  }
+}
+
+function startPeriodicCleanup(): void {
+  if (cleanupTimer) return;
+
+  cleanupTimer = setInterval(() => {
+    cleanupExpiredEntries(Date.now(), CLEANUP_BATCH_SIZE);
+    evictOldestIfNeeded();
+  }, CLEANUP_INTERVAL_MS);
+
+  if (typeof cleanupTimer.unref === 'function') cleanupTimer.unref();
+}
+
+function lazyCleanup(now: number): void {
+  startPeriodicCleanup();
+
+  lazyCleanupCalls += 1;
+  const dueByCalls = lazyCleanupCalls >= LAZY_CLEANUP_EVERY_CALLS;
+  const dueByTime = now - lastLazyCleanupAt >= CLEANUP_INTERVAL_MS;
+  const dueBySize = inMemoryStore.size > MAX_IN_MEMORY_KEYS;
+
+  if (!dueByCalls && !dueByTime && !dueBySize) return;
+
+  lazyCleanupCalls = 0;
+  lastLazyCleanupAt = now;
+
+  cleanupExpiredEntries(now, CLEANUP_BATCH_SIZE);
+  evictOldestIfNeeded();
+}
+
 function inMemoryAllow(key: string, now: number, windowMs: number, maxRequests: number): boolean {
+  lazyCleanup(now);
+
   const minTs = now - windowMs;
-  const previous = inMemoryTimestampsByKey.get(key) ?? [];
-  const timestamps = previous.filter((t) => t > minTs);
+  const entry = inMemoryStore.get(key);
+  const timestamps = entry?.timestamps ?? [];
+  pruneTimestampsInPlace(timestamps, minTs);
+  const storedWindowMs = entry ? Math.max(entry.windowMs, windowMs) : windowMs;
 
   if (timestamps.length >= maxRequests) {
-    if (timestamps.length === 0) inMemoryTimestampsByKey.delete(key);
-    else inMemoryTimestampsByKey.set(key, timestamps);
+    if (timestamps.length === 0) {
+      inMemoryStore.delete(key);
+    } else {
+      inMemoryStore.set(key, { timestamps, lastAccess: now, windowMs: storedWindowMs });
+    }
     return false;
   }
 
   timestamps.push(now);
-  inMemoryTimestampsByKey.set(key, timestamps);
+  inMemoryStore.set(key, { timestamps, lastAccess: now, windowMs: storedWindowMs });
+  evictOldestIfNeeded();
   return true;
 }
 
 export function resetInMemoryRateLimit(): void {
-  inMemoryTimestampsByKey.clear();
+  inMemoryStore.clear();
   warned.clear();
   memberSeq = 0;
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
+  cleanupCursor = 0;
+  lazyCleanupCalls = 0;
+  lastLazyCleanupAt = 0;
 }
 
 /**

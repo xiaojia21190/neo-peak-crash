@@ -11,6 +11,8 @@ import type { PlaceBetRequest, GameStateSnapshot, StateSnapshotMessage, UserStat
 import { GameError } from './errors';
 import { toNumber } from '../shared/gameMath';
 
+const MAX_HISTORY_LIMIT = 200;
+
 export interface WSGatewayConfig {
   cors?: {
     origin: string | string[];
@@ -75,8 +77,18 @@ export class WebSocketGateway {
   private readonly historyLimit: number;
   private readonly verifyToken: (token: string) => Promise<string | null>;
   private readonly verifyTokenFromCookie: (socket: AuthenticatedSocket) => Promise<string | null>;
-  private readonly socketHeartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private gameEngineListenersReady = false;
+
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer) return;
+
+    // Single global heartbeat timer (avoid per-socket setInterval overhead)
+    this.heartbeatTimer = setInterval(() => {
+      if (this.io.sockets.sockets.size === 0) return;
+      this.io.emit(WS_EVENTS.PONG, { timestamp: Date.now() });
+    }, this.heartbeatIntervalMs);
+  }
 
   constructor(
     httpServer: HTTPServer,
@@ -112,7 +124,7 @@ export class WebSocketGateway {
 
     this.heartbeatIntervalMs = Math.max(1000, config?.heartbeat?.intervalMs ?? 25_000);
     this.replayCurrentRoundBets = config?.stateSync?.replayCurrentRoundBets ?? true;
-    this.historyLimit = Math.max(0, Math.min(200, config?.stateSync?.historyLimit ?? 20));
+    this.historyLimit = Math.max(0, Math.min(MAX_HISTORY_LIMIT, config?.stateSync?.historyLimit ?? 20));
 
     this.gameEngine = config?.deps?.gameEngine ?? null;
     this.priceService = config?.deps?.priceService ?? null;
@@ -140,6 +152,7 @@ export class WebSocketGateway {
   async start(): Promise<void> {
     await this.ensureServicesReady();
     await this.priceService!.start();
+    this.startHeartbeat();
     console.log('[WSGateway] Started');
   }
 
@@ -147,10 +160,10 @@ export class WebSocketGateway {
    * 停止服务
    */
   async stop(): Promise<void> {
-    for (const timer of this.socketHeartbeatTimers.values()) {
-      clearInterval(timer);
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
-    this.socketHeartbeatTimers.clear();
 
     if (this.gameEngine) {
       await this.gameEngine.stop();
@@ -245,14 +258,6 @@ export class WebSocketGateway {
   }
 
   private registerSocketHandlers(socket: AuthenticatedSocket): void {
-    // 服务端主动心跳：定期发送 PONG（不依赖客户端 ping）
-    const timer = setInterval(() => {
-      if (socket.connected) {
-        socket.emit(WS_EVENTS.PONG, { timestamp: Date.now() });
-      }
-    }, this.heartbeatIntervalMs);
-    this.socketHeartbeatTimers.set(socket.id, timer);
-
     // 客户端心跳：ping -> pong
     socket.on(WS_EVENTS.PING, () => {
       socket.emit(WS_EVENTS.PONG, { timestamp: Date.now() });
@@ -305,7 +310,11 @@ export class WebSocketGateway {
   ): Promise<void> {
     const game = this.buildGameStateSnapshot();
     const includeHistory = options.includeHistory ?? true;
-    const historyLimit = options.historyLimit ?? this.historyLimit;
+    const historyLimitRaw = options.historyLimit ?? this.historyLimit;
+    const historyLimit = Math.max(
+      0,
+      Math.min(MAX_HISTORY_LIMIT, Math.floor(toNumber(historyLimitRaw, this.historyLimit)))
+    );
 
     const user =
       socket.isAuthenticated && socket.userId
@@ -676,7 +685,7 @@ export class WebSocketGateway {
         type: WS_EVENTS.PRICE_UPDATE,
         payload: {
           price: data.price,
-          rowIndex: this.gameEngine.getState()?.currentRow ?? 6.5,
+          rowIndex: this.gameEngine?.getState()?.currentRow ?? 6.5,
           timestamp: data.timestamp,
         },
         timestamp: Date.now(),
@@ -857,25 +866,34 @@ export class WebSocketGateway {
       return;
     }
 
-    // 匿名连接只读：所有下注都需要登录
+    // 判断是否为试玩模式
+    const isPlayMode = Boolean(data.isPlayMode);
+
+    // 匿名用户只能试玩，真金投注需要登录
     if (!socket.isAuthenticated || !socket.userId) {
-      socket.emit(WS_EVENTS.BET_REJECTED, {
-        type: WS_EVENTS.BET_REJECTED,
-        payload: {
-          orderId: data.orderId,
-          code: 'UNAUTHORIZED',
-          message: '下注需要登录',
-        },
-        timestamp: Date.now(),
-      });
-      return;
+      if (!isPlayMode) {
+        socket.emit(WS_EVENTS.BET_REJECTED, {
+          type: WS_EVENTS.BET_REJECTED,
+          payload: {
+            orderId: data.orderId,
+            code: 'UNAUTHORIZED',
+            message: '真金投注需要登录',
+          },
+          timestamp: Date.now(),
+        });
+        return;
+      }
+      // 匿名试玩：使用 socket.id 作为临时 userId
     }
+
+    // 确定实际使用的 userId
+    const effectiveUserId = socket.userId ?? `anon-${socket.id}`;
 
     try {
       if (!this.gameEngine) {
         throw new Error('GameEngine not ready');
       }
-      await this.gameEngine.placeBet(socket.userId, data);
+      await this.gameEngine.placeBet(effectiveUserId, data);
       // 注意: bet_confirmed 事件会由 GameEngine 通过 emit('bet:confirmed') 触发
       // setupGameEngineListeners() 会监听该事件并发送给用户,无需在此处重复发送
     } catch (error) {
@@ -897,12 +915,6 @@ export class WebSocketGateway {
    * 处理断开连接
    */
   private handleDisconnect(socket: AuthenticatedSocket): void {
-    const timer = this.socketHeartbeatTimers.get(socket.id);
-    if (timer) {
-      clearInterval(timer);
-      this.socketHeartbeatTimers.delete(socket.id);
-    }
-
     if (socket.userId) {
       const userSockets = this.connectedUsers.get(socket.userId);
       if (userSockets) {

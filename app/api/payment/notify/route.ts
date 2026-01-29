@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifySign } from "@/lib/payment/ldc";
 import prisma from "@/lib/prisma";
 import { FinancialService } from "@/lib/services/financial";
+import { sanitizeLogParams, maskMiddle } from "@/lib/utils/logSanitizer";
 
 const financialService = new FinancialService(prisma);
 
@@ -20,6 +21,28 @@ export async function POST(request: NextRequest) {
 
 async function handleNotify(request: NextRequest) {
   try {
+    const allowedIpsEnv = process.env.LDC_ALLOWED_IPS;
+    const allowedIps = allowedIpsEnv
+      ? allowedIpsEnv
+          .split(",")
+          .map((ip) => ip.trim())
+          .filter(Boolean)
+      : [];
+
+    if (allowedIps.length > 0) {
+      const forwardedFor = request.headers.get("x-forwarded-for");
+      const candidate =
+        forwardedFor?.split(",")[0]?.trim() ||
+        request.headers.get("x-real-ip")?.trim() ||
+        request.headers.get("cf-connecting-ip")?.trim() ||
+        null;
+
+      if (!candidate || !allowedIps.includes(candidate)) {
+        console.error(`Unauthorized IP: ${candidate ?? "unknown"}`);
+        return new NextResponse("fail", { status: 403 });
+      }
+    }
+
     // 获取参数（支持 GET 和 POST）
     let params: Record<string, string> = {};
 
@@ -35,11 +58,7 @@ async function handleNotify(request: NextRequest) {
       });
     }
 
-    const logParams: Record<string, string> = {};
-    for (const [key, value] of Object.entries(params)) {
-      if (key === "sign" || key === "key" || key === "secret") continue;
-      logParams[key] = value;
-    }
+    const logParams = sanitizeLogParams(params);
 
     console.log("收到支付回调:", JSON.stringify(logParams, null, 2));
 
@@ -74,12 +93,38 @@ async function handleNotify(request: NextRequest) {
 
     // 处理支付成功
     if (trade_status === "TRADE_SUCCESS") {
-      console.log(`支付成功: 订单号=${out_trade_no}, 金额=${money}`);
+      console.log(`支付成功: 订单号=${maskMiddle(out_trade_no)}, 金额=${money}`);
 
       const amount = parseFloat(money);
       if (!Number.isFinite(amount) || amount <= 0) {
         console.error("无效的金额:", money);
         return new NextResponse("fail", { status: 400 });
+      }
+
+      // 金额交叉验证：从数据库读取 PENDING 订单原始金额，避免回调金额被篡改
+      const toCents = (value: number) => Math.round((value + Number.EPSILON) * 100);
+      const pendingOrder = await prisma.transaction.findFirst({
+        where: {
+          orderNo: out_trade_no,
+          status: "PENDING",
+          type: "RECHARGE",
+        },
+        select: { amount: true },
+      });
+
+      if (pendingOrder) {
+        const expectedAmount = Number(pendingOrder.amount);
+        if (!Number.isFinite(expectedAmount) || expectedAmount <= 0) {
+          console.error(`订单金额异常: 订单号=${maskMiddle(out_trade_no)}, amount=${pendingOrder.amount}`);
+          return new NextResponse("fail", { status: 400 });
+        }
+
+        if (toCents(expectedAmount) !== toCents(amount)) {
+          console.error(
+            `回调金额不匹配: 订单号=${maskMiddle(out_trade_no)}, expected=${expectedAmount}, actual=${amount}`
+          );
+          return new NextResponse("fail", { status: 400 });
+        }
       }
 
       try {
@@ -90,9 +135,9 @@ async function handleNotify(request: NextRequest) {
         });
 
         if (!result.processed) {
-          console.log(`订单 ${out_trade_no} 已处理，幂等跳过`);
+          console.log(`订单 ${maskMiddle(out_trade_no)} 已处理，幂等跳过`);
         } else {
-          console.log(`订单 ${out_trade_no} 充值成功: ${result.balanceBefore} -> ${result.balanceAfter}`);
+          console.log(`订单 ${maskMiddle(out_trade_no)} 充值成功: ${result.balanceBefore} -> ${result.balanceAfter}`);
         }
       } catch (dbError) {
         console.error("数据库操作失败:", dbError);

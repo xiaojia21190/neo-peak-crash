@@ -239,6 +239,10 @@ const messages = {
   unknownAction: '\u672a\u77e5\u7684\u64cd\u4f5c',
 };
 
+const sameOriginHeaders = {
+  get: (key: string) => (key.toLowerCase() === 'origin' ? 'http://localhost:3000' : null),
+};
+
 function buildBalanceDeps(prisma: FakePrisma, overrides: Record<string, unknown> = {}) {
   return {
     auth: async () => ({ user: { id: 'user-1', name: 'User', image: null } }),
@@ -564,7 +568,7 @@ test('balance route GET returns balances for active user', async () => {
 test('balance route POST rejects unauthenticated user', async () => {
   const prisma = new FakePrisma();
   const { POST } = await import('../../app/api/user/balance/route');
-  const request = { json: async () => ({ action: 'reset_play_balance' }) };
+  const request = { json: async () => ({ action: 'reset_play_balance' }), headers: sameOriginHeaders };
 
   const response = await POST(request as any, buildBalanceDeps(prisma, { auth: async () => null }));
 
@@ -584,7 +588,7 @@ test('balance route POST rejects missing action', async () => {
   });
 
   const { POST } = await import('../../app/api/user/balance/route');
-  const response = await POST({ json: async () => ({}) } as any, buildBalanceDeps(prisma));
+  const response = await POST({ json: async () => ({}), headers: sameOriginHeaders } as any, buildBalanceDeps(prisma));
 
   assert.equal(response.status, 400);
   const payload = await response.json();
@@ -603,7 +607,7 @@ test('balance route POST resets play balance', async () => {
 
   const { POST } = await import('../../app/api/user/balance/route');
   const response = await POST(
-    { json: async () => ({ action: 'reset_play_balance' }) } as any,
+    { json: async () => ({ action: 'reset_play_balance' }), headers: sameOriginHeaders } as any,
     buildBalanceDeps(prisma, { setPlayBalance: async () => 4321 })
   );
 
@@ -624,7 +628,7 @@ test('balance route POST rejects update action', async () => {
 
   const { POST } = await import('../../app/api/user/balance/route');
   const response = await POST(
-    { json: async () => ({ action: 'update' }) } as any,
+    { json: async () => ({ action: 'update' }), headers: sameOriginHeaders } as any,
     buildBalanceDeps(prisma)
   );
 
@@ -645,7 +649,7 @@ test('balance route POST rejects unknown action', async () => {
 
   const { POST } = await import('../../app/api/user/balance/route');
   const response = await POST(
-    { json: async () => ({ action: 'other' }) } as any,
+    { json: async () => ({ action: 'other' }), headers: sameOriginHeaders } as any,
     buildBalanceDeps(prisma)
   );
 

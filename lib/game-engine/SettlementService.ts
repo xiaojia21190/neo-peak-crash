@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import type { HitDetails, PriceSnapshot, SettlementItem, ServerBet } from './types';
 import { HIT_TIME_TOLERANCE } from './constants';
 import { roundMoney, toNumber } from '../shared/gameMath';
@@ -102,7 +102,7 @@ export class SettlementService {
 
   async countPendingBets(roundId: string): Promise<number> {
     return this.prisma.bet
-      .count({ where: { roundId, status: 'PENDING' } })
+      .count({ where: { roundId, status: { in: ['PENDING', 'SETTLING'] } } })
       .catch((error) => {
         console.error(`[GameEngine] Failed to count pending bets for round ${roundId}:`, error);
         return 0;
@@ -114,7 +114,7 @@ export class SettlementService {
       .findMany({
         where: {
           roundId,
-          status: 'PENDING',
+          status: { in: ['PENDING', 'SETTLING'] },
         },
       })
       .catch((error) => {
@@ -173,7 +173,7 @@ export class SettlementService {
 
         const didSettle = await this.prisma.$transaction(async (tx) => {
           const updated = await tx.bet.updateMany({
-            where: { id: dbBet.id, status: 'PENDING' },
+            where: { id: dbBet.id, status: { in: ['PENDING', 'SETTLING'] } },
             data: {
               status: isWin ? 'WON' : 'LOST',
               isWin,
@@ -219,7 +219,8 @@ export class SettlementService {
                 totalWins: isWin ? { increment: 1 } : undefined,
                 totalLosses: !isWin ? { increment: 1 } : undefined,
                 totalProfit: {
-                  increment: isWin ? payout - amount : -amount,
+                  // Bet amount is already deducted on placement; winning profit should be the payout amount.
+                  increment: isWin ? payout : -amount,
                 },
               },
             });
@@ -419,13 +420,14 @@ export class SettlementService {
 
     try {
       while (this.settlementQueue.length > 0) {
-        const batch = this.settlementQueue.slice(0, 50);
+        const batch = this.settlementQueue.splice(0, 50);
+        if (batch.length === 0) break;
         let retryCount = 0;
         const maxRetries = 3;
 
         while (retryCount <= maxRetries) {
           try {
-            await this.prisma.$transaction(async (tx) => {
+            const settledBets = await this.prisma.$transaction(async (tx) => {
               const userAggregates = new Map<
                 string,
                 {
@@ -450,12 +452,18 @@ export class SettlementService {
                 }
               >();
               let poolDelta = 0;
+              const settled: Array<{
+                bet: (typeof batch)[0]['bet'];
+                isWin: boolean;
+                hitDetails: (typeof batch)[0]['hitDetails'];
+                payout: number;
+              }> = [];
 
               for (const { bet, isWin, hitDetails } of batch) {
                 const payout = this.calculatePayout(bet.amount, bet.multiplier, isWin);
 
                 const updated = await tx.bet.updateMany({
-                  where: { id: bet.id, status: 'PENDING' },
+                  where: { id: bet.id, status: { in: ['PENDING', 'SETTLING'] } },
                   data: {
                     status: isWin ? 'WON' : 'LOST',
                     isWin,
@@ -468,6 +476,7 @@ export class SettlementService {
                 });
 
                 if (updated.count === 1) {
+                  settled.push({ bet, isWin, hitDetails, payout });
                   const agg = userAggregates.get(bet.userId) || {
                     bets: [],
                     totalPayout: 0,
@@ -498,7 +507,8 @@ export class SettlementService {
                     agg.totalBets++;
                     if (isWin) agg.totalWins++;
                     else agg.totalLosses++;
-                    agg.totalProfit += isWin ? payout - bet.amount : -bet.amount;
+                    // Bet amount is already deducted on placement; winning profit should be the payout amount.
+                    agg.totalProfit += isWin ? payout : -bet.amount;
                   }
 
                   userAggregates.set(bet.userId, agg);
@@ -508,11 +518,11 @@ export class SettlementService {
               }
 
               for (const [userId, agg] of userAggregates) {
-                const updateData: any = {
+                const updateData: Prisma.UserUpdateInput = {
                   totalBets: { increment: agg.totalBets },
-                  totalWins: agg.totalWins > 0 ? { increment: agg.totalWins } : undefined,
-                  totalLosses: agg.totalLosses > 0 ? { increment: agg.totalLosses } : undefined,
                   totalProfit: { increment: agg.totalProfit },
+                  ...(agg.totalWins > 0 ? { totalWins: { increment: agg.totalWins } } : {}),
+                  ...(agg.totalLosses > 0 ? { totalLosses: { increment: agg.totalLosses } } : {}),
                 };
 
                 if (agg.balanceChanges.length > 0) {
@@ -559,38 +569,38 @@ export class SettlementService {
                   tx
                 );
               }
+
+              return settled;
             });
 
-            for (const { bet, isWin } of batch) {
+            for (const { bet, isWin } of settledBets) {
               bet.status = isWin ? 'WON' : 'LOST';
             }
 
-            for (const { bet, isWin, hitDetails } of batch) {
-              const payout = this.calculatePayout(bet.amount, bet.multiplier, isWin);
-              this.callbacks.onBetSettled?.({
-                betId: bet.id,
-                orderId: bet.orderId,
-                userId: bet.userId,
-                isWin,
-                payout,
-                hitDetails,
-              });
+            for (const { bet, isWin, hitDetails, payout } of settledBets) {
+              try {
+                this.callbacks.onBetSettled?.({
+                  betId: bet.id,
+                  orderId: bet.orderId,
+                  userId: bet.userId,
+                  isWin,
+                  payout,
+                  hitDetails,
+                });
+              } catch (callbackError) {
+                console.error('[GameEngine] Settlement onBetSettled callback failed:', callbackError);
+              }
             }
-
-            this.settlementQueue.splice(0, batch.length);
             break;
           } catch (error) {
             retryCount++;
             if (retryCount > maxRetries) {
               console.error('[GameEngine] Settlement batch failed after retries:', error);
-              break;
+              this.settlementQueue.unshift(...batch);
+              return;
             }
             await new Promise((resolve) => setTimeout(resolve, Math.pow(2, retryCount) * 100));
           }
-        }
-
-        if (retryCount > maxRetries) {
-          break;
         }
       }
     } finally {
@@ -616,7 +626,7 @@ export class SettlementService {
       .findMany({
         where: {
           roundId,
-          status: 'PENDING',
+          status: { in: ['PENDING', 'SETTLING'] },
         },
       })
       .catch((error) => {
@@ -671,7 +681,7 @@ export class SettlementService {
 
         const didSettle = await this.prisma.$transaction(async (tx) => {
           const updated = await tx.bet.updateMany({
-            where: { id: dbBet.id, status: 'PENDING' },
+            where: { id: dbBet.id, status: { in: ['PENDING', 'SETTLING'] } },
             data: {
               status: isWin ? 'WON' : 'LOST',
               isWin,
@@ -717,7 +727,8 @@ export class SettlementService {
                 totalWins: isWin ? { increment: 1 } : undefined,
                 totalLosses: !isWin ? { increment: 1 } : undefined,
                 totalProfit: {
-                  increment: isWin ? payout - amount : -amount,
+                  // Bet amount is already deducted on placement; winning profit should be the payout amount.
+                  increment: isWin ? payout : -amount,
                 },
               },
             });
@@ -738,7 +749,7 @@ export class SettlementService {
     }
 
     const remaining = await this.prisma.bet
-      .count({ where: { roundId, status: 'PENDING' } })
+      .count({ where: { roundId, status: { in: ['PENDING', 'SETTLING'] } } })
       .catch((error) => {
         console.error(`[GameEngine] Failed to count pending bets after retry for round ${roundId}:`, error);
         return unsettledBets.length;

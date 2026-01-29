@@ -1,7 +1,9 @@
-﻿/**
- * 婵炴挸鎲￠崹娆忣嚕閺囩喐鎯涢柡宥囶焾缁哄墽鐚?
- * 缂佺媴绱曢幃濠囧炊閻愬弶鍊ら柣銏㈠枎閹筹繝宕ㄩ妸锔藉焸闁靛棔鐒︽慨鍥р枖閵娿儺妲遍柣鐐叉閳ь兛鑳堕～顐﹀箻閻愭惌姊炬繛鏉戭儏閹锋壆绱掗幘鍓佹??
+/**
+ * 游戏引擎核心（GameEngine）
+ * - 管理回合生命周期（BETTING -> RUNNING -> SETTLING/COMPLETED）
+ * - 处理下注、状态同步（Redis）与持久化（Prisma），并集成资金与风控流程
  */
+
 
 import { EventEmitter } from 'events';
 import type { Redis } from 'ioredis';
@@ -31,7 +33,7 @@ import {
   calculateRowIndex,
   calculateMultiplier,
 } from './utils';
-import { isValidMoneyAmount } from '../shared/gameMath';
+import { isValidMoneyAmount, roundMoney } from '../shared/gameMath';
 import { GameError } from './errors';
 import { PriceService } from './PriceService';
 import { allowSlidingWindowRequest, buildRateLimitKey } from '../services/rateLimit';
@@ -53,19 +55,19 @@ export class GameEngine extends EventEmitter {
 
   private snapshotService: SnapshotService;
 
-
-
-
+  private pendingBetCountsByUser: Map<string, number> = new Map();
+  private pendingBetCountsRoundId: string | null = null;
+  private pendingBetCountsActiveBetsSize = 0;
 
   private lastEmitTimes: Map<string, number> = new Map();
 
-  // 濞寸娀鏀遍悧鍝ョ磽閹惧磭??
+  // 最新价格缓存（来自 PriceService）
   private priceCache: PriceUpdate | null = null;
 
-  // 闁告帒妫楃粩宄邦嚕韫囨稒??
+  // Redis 锁管理器（回合/下注幂等与并发保护）
   private lockManager: LockManager;
 
-  // 閻犳劑鍨规慨鐔煎嫉瀹ュ懎顫ら柨娑樼墕瀹曠喐绋夐埀顒勬嚂瀹€鍐厬闁挎稒纰嶆晶宥夊嫉婢跺绋囧Λ鐗堢箓瑜板宕濋…鎺旂
+  // 资金服务 / 资金池 / 风控
   private financialService: FinancialService;
   private housePoolService: HousePoolService;
   private riskManager: RiskManager;
@@ -93,48 +95,50 @@ export class GameEngine extends EventEmitter {
       hitTolerance: this.config.hitTolerance,
       callbacks: {
         getActiveBet: (betId) => this.state?.activeBets.get(betId),
-        onBetSettled: (payload) => this.emit('bet:settled', payload),
+        onBetSettled: (payload) => {
+          void this.handleBetSettled(payload);
+        },
       },
     });
 
-    // 闁烩晜鍨甸幆澶嬬闁垮澹愰柡鍥х摠閺?
+    // 缓存最新价格（由 PriceService 推送）
     this.priceService.on('price', (price: PriceUpdate) => {
       this.priceCache = price;
     });
 
-    // 闁烩晜鍨甸幆澶嬬闁垮澹愬☉鎾崇Т瑜版煡??
+    // 价格源严重故障：取消当前回合/停止接收下注
     this.priceService.on('price_critical', () => {
       this.handlePriceUnavailable();
     });
   }
 
-  // ========== 闁稿浚鍓欓崣锟犲棘鐟欏嫮??==========
+  // ========== Public API ==========
 
   /**
-   * 闁兼儳鍢茶ぐ鍥亹閹惧啿顤呮繛鎾虫啞閸ㄦ瑩鎮╅懜纰樺??
+   * 获取当前游戏状态
    */
   getState(): GameState | null {
     return this.state;
   }
 
   /**
-   * 闁兼儳鍢茶ぐ鍥煀瀹ュ洨鏋?
+   * 获取当前回合配置
    */
   getConfig(): RoundConfig {
     return { ...this.config };
   }
 
   /**
-   * 闁哄洤鐡ㄩ弻濠冪闁垮澹愮紓鍌涙尭閻°劑鏁嶉崼婊呰繑濠㈣埖鐗犻崕瀵告嫬閸愵亝鏆忛??
+   * 更新最新价格缓存（通常来自 PriceService）
    */
   updatePriceCache(price: PriceUpdate): void {
     this.priceCache = price;
   }
 
-  // ========== 闁搞儳鍋涢幃搴ㄦ偨閻旈攱鍤掗柛娑栧妽濠€?==========
+  // ========== Round Lifecycle ==========
 
   /**
-   * 鐎殿喒鍋撳┑顔碱儐閺屽﹪宕堕悙鍙夊€?
+   * 开始新回合
    */
   async startRound(): Promise<void> {
     if (this.state?.status === 'RUNNING' ||
@@ -240,7 +244,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 缂備焦鎸诲顐﹀炊閻愬弶??
+   * 结束当前回合并进入结算流程
    */
   async endRound(reason: 'timeout' | 'manual' | 'crash' = 'timeout'): Promise<void> {
     if (!this.state || this.state.status === 'SETTLING' ||
@@ -356,6 +360,7 @@ export class GameEngine extends EventEmitter {
     } finally {
       try {
         await this.redis.del(`${REDIS_KEYS.ACTIVE_BETS}${roundId}`);
+        await this.redis.del(this.riskManager.buildReservedExpectedPayoutKey(roundId));
       } catch (error) {
         console.error(`[GameEngine] Failed to delete Redis ACTIVE_BETS key for round ${roundId}:`, error);
       }
@@ -385,6 +390,8 @@ export class GameEngine extends EventEmitter {
 
     try {
       this.stopTickLoop();
+      // Prevent further in-memory settlement mutations while we perform refunds.
+      this.settlementService.resetQueue();
 
       await this.prisma.round
         .updateMany({
@@ -395,12 +402,71 @@ export class GameEngine extends EventEmitter {
           console.error(`[GameEngine] Failed to persist SETTLING status for cancelled round ${roundId}:`, error);
         });
 
-      const pendingBets = Array.from(this.state.activeBets.values()).filter(
-        (b) => b.status === 'PENDING'
-      );
+      const dbUnsettledBets = await this.prisma.bet
+        .findMany({
+          where: {
+            roundId,
+            status: { in: ['PENDING', 'SETTLING'] },
+          },
+          select: {
+            id: true,
+            orderId: true,
+            userId: true,
+            amount: true,
+            multiplier: true,
+            targetRow: true,
+            targetTime: true,
+            status: true,
+            isPlayMode: true,
+            createdAt: true,
+          },
+        })
+        .catch((error) => {
+          console.error(`[GameEngine] Failed to query unsettled bets for cancelled round ${roundId}:`, error);
+          return [];
+        });
 
-      for (const bet of pendingBets) {
-        await this.refundBet(bet, reason);
+      const betsToRefund: ServerBet[] = [];
+      const seenBetIds = new Set<string>();
+
+      for (const dbBet of dbUnsettledBets) {
+        if (seenBetIds.has(dbBet.id)) continue;
+        seenBetIds.add(dbBet.id);
+
+        const memBet = this.state?.activeBets.get(dbBet.id);
+        if (memBet) {
+          betsToRefund.push(memBet);
+          continue;
+        }
+
+        betsToRefund.push({
+          id: dbBet.id,
+          orderId: dbBet.orderId ?? '',
+          userId: dbBet.userId,
+          amount: Number(dbBet.amount),
+          multiplier: Number(dbBet.multiplier),
+          targetRow: Number(dbBet.targetRow ?? 0),
+          targetTime: Number(dbBet.targetTime ?? 0),
+          placedAt: dbBet.createdAt.getTime(),
+          status: dbBet.status as ServerBet['status'],
+          isPlayMode: dbBet.isPlayMode,
+        });
+      }
+
+      if (betsToRefund.length === 0) {
+        // Best-effort fallback to in-memory state in case the DB query failed.
+        betsToRefund.push(
+          ...Array.from(this.state.activeBets.values()).filter(
+            (b) => b.status === 'PENDING' || b.status === 'SETTLING'
+          )
+        );
+      }
+
+      let refundedBets = 0;
+      for (const bet of betsToRefund) {
+        if (await this.refundBet(bet, reason)) {
+          refundedBets += 1;
+        }
       }
 
       const cancelled = await this.prisma.round.updateMany({
@@ -418,16 +484,17 @@ export class GameEngine extends EventEmitter {
       this.emit('round:cancelled', {
         roundId,
         reason,
-        refundedBets: pendingBets.length,
+        refundedBets,
       });
 
       try {
         await this.redis.del(`${REDIS_KEYS.ACTIVE_BETS}${roundId}`);
+        await this.redis.del(this.riskManager.buildReservedExpectedPayoutKey(roundId));
       } catch (error) {
         console.error(`[GameEngine] Failed to delete Redis ACTIVE_BETS key for round ${roundId}:`, error);
       }
 
-      console.log(`[GameEngine] Round ${roundId} cancelled, ${pendingBets.length} bets refunded`);
+      console.log(`[GameEngine] Round ${roundId} cancelled, ${refundedBets} bets refunded`);
     } finally {
       try {
         await this.lockManager.releaseRoundLock(this.config.asset);
@@ -439,14 +506,15 @@ export class GameEngine extends EventEmitter {
     }
   }
 
-  private async refundBet(bet: ServerBet, reason: string): Promise<void> {
+  private async refundBet(bet: ServerBet, reason: string): Promise<boolean> {
     const settledAt = new Date();
     const roundId = this.state?.roundId;
+    const statusBefore = bet.status;
 
     const didRefund = await this.prisma.$transaction(async (tx) => {
-      // 濞达綀娉曢??updateMany 閻庡湱鍋熼獮鍥嵁閸屾粎鎼奸柨娑欒壘瑜把囧即鐎涙ɑ鐓€ PENDING 闁绘鍩栭埀顑胯兌濞堟垵鈻旈妸銉ョ
+      // Idempotency: only refund if bet is still pending/settling
       const updated = await tx.bet.updateMany({
-        where: { id: bet.id, status: 'PENDING' },
+        where: { id: bet.id, status: { in: ['PENDING', 'SETTLING'] } },
         data: {
           status: 'REFUNDED',
           settledAt,
@@ -455,7 +523,7 @@ export class GameEngine extends EventEmitter {
 
       if (updated.count !== 1) return false;
 
-      // 濞达綀娉曢??FinancialService 濠㈣泛瀚幃濠囨焻閳ь剙鈻庨幘鍛闁煎浜滄慨鈺冩媼閺夎法绉挎繛缈犵劍閹稿鏁?
+      // Refund via FinancialService ledger entry
       await this.financialService.changeBalance(
         {
           userId: bet.userId,
@@ -480,10 +548,18 @@ export class GameEngine extends EventEmitter {
 
     if (!didRefund) {
       console.log(`[GameEngine] Bet ${bet.id} already refunded/settled, skipping`);
-      return;
+      return false;
+    }
+
+    if (statusBefore === 'PENDING') {
+      this.decrementUserPendingBetCount(bet.userId);
     }
 
     bet.status = 'REFUNDED';
+
+    if (!bet.isPlayMode && roundId) {
+      await this.releaseExpectedPayoutReservation(roundId, bet.orderId);
+    }
 
     this.emit('bet:refunded', {
       betId: bet.id,
@@ -492,15 +568,17 @@ export class GameEngine extends EventEmitter {
       amount: bet.amount,
       reason,
     });
+
+    return true;
   }
 
-  // ========== 闁硅埖娲橀弫鐐村緞閸曨厽鍊?==========
+  // ========== Betting ==========
 
   /**
-   * 濞戞挸顑嗛弫?
+   * 创建一笔下注（会扣款并写入 DB/Redis），并返回 betId 与 multiplier
    */
   async placeBet(userId: string, request: PlaceBetRequest): Promise<PlaceBetResponse> {
-    // 1. 闁绘鍩栭埀顑跨劍椤ュ懘??
+    // 1. Validate there is an active betting round
     if (!this.state) {
       throw new GameError(ERROR_CODES.NO_ACTIVE_ROUND, '鐟滅増鎸告晶鐘测柦閳╁啯绠掗弶鈺傜椤㈡垶绋夐鐘崇暠闁搞儳鍋涢??');
     }
@@ -509,7 +587,7 @@ export class GameEngine extends EventEmitter {
       throw new GameError(ERROR_CODES.BETTING_CLOSED, '鐟滅増鎸告晶鐘崇▔瀹ュ懎璁查柟鑸垫礃閺?');
     }
 
-    // 2. 闁哄牃鍋撳鍫嗗嫭銇熼悹鍝勫暞婵洤鈻旈妸鈺傤€欓柛?
+    // 2. Validate user status / anonymous constraints
     const isAnonymous = userId.startsWith('anon-');
     if (!isAnonymous) {
       const userStatus = await this.prisma.user.findUnique({
@@ -541,7 +619,7 @@ export class GameEngine extends EventEmitter {
       throw new GameError(ERROR_CODES.MAX_BETS_REACHED, '缂侇垵宕电划娲箮閺囩喐鏆堥柡浣峰嵆閸ｅ搫顔忛懠鑸靛涧濞戞挸锕娲晬瀹€鍐惧殲缂佸绉撮幃妤呭礃瀹ュ牏妲?');
     }
 
-    // 3. 闁硅埖娲橀弫鐐达紣閹寸姴鑺抽梻鍕姇閸?
+    // 3. Rate limiting
     if (!(await this.checkRateLimit(userId))) {
       throw new GameError(
         ERROR_CODES.RATE_LIMITED,
@@ -549,18 +627,18 @@ export class GameEngine extends EventEmitter {
       );
     }
 
-    // 3. 闁哄啫鐖煎Λ鍨涢埀顒勫??
+    // 4. Validate target time
     const minTargetTime = this.state.elapsed + MIN_TARGET_TIME_OFFSET;
     if (request.targetTime <= minTargetTime) {
       throw new GameError(ERROR_CODES.TARGET_TIME_PASSED, '闁烩晩鍠楅悥锝夊籍閸洘锛熺€规瓕灏换鍐箣閺嵮佷喊閺?');
     }
 
-    // 缁绢収鍠曠换姘舵儎椤旂晫鍨奸柡鍐ㄧ埣濡寧绋夊鍫⑿㈤弶鈺佹搐濞叉牠宕ラ崼鐔镐粯濠㈠爢鍕槯闂傗??
+    // Validate target time within round duration
     if (request.targetTime > this.config.maxDuration) {
       throw new GameError(ERROR_CODES.INVALID_AMOUNT, `闁烩晩鍠楅悥锝夊籍閸洘锛熷☉鎾崇Х閸忔鎼鹃崨鎵畺 ${this.config.maxDuration} 缂佸濡?`);
     }
 
-    // 4. 闂佸弶鍨块·鍌毼涢埀顒勫??
+    // 5. Validate bet amount
     if (request.amount < this.config.minBetAmount || request.amount > this.config.maxBetAmount) {
       throw new GameError(
         ERROR_CODES.INVALID_AMOUNT,
@@ -568,25 +646,23 @@ export class GameEngine extends EventEmitter {
       );
     }
 
-    // 缁绢収鍠曠换姘舵煂閹达富鏉哄☉鎾跺劋椤掓粓寮?
+    // Validate money amount format
     if (request.amount <= 0 || !Number.isFinite(request.amount) || !isValidMoneyAmount(request.amount)) {
       throw new GameError(ERROR_CODES.INVALID_AMOUNT, '闁硅埖娲橀弫鐐烘煂閹达富鏉洪煫鍥ф嚇閵嗗繑绋夐悜姗嗗妧闁?');
     }
 
-    // 5. 闁烩晩鍠楅悥锝囨偘鐏炵虎姊鹃??
+    // 6. Validate target row
     if (!Number.isFinite(request.targetRow) || request.targetRow < 0 || request.targetRow > MAX_ROW_INDEX) {
       throw new GameError(ERROR_CODES.INVALID_AMOUNT, `闁烩晩鍠楅悥锝囨偘瀹€鈧崒銊ヮ嚕閺囩偟绠戝銈堫嚙濠??0-${MAX_ROW_INDEX} 濞戞柨顑夊Λ绺?`);
     }
 
-    // 6. 闁活潿鍔嶉崺娑㈠箮閺囩喐鏆堥柡浣峰嵆閸ｆ椽姊介幇顒€??
-    const userBetCount = Array.from(this.state.activeBets.values()).filter(
-      (b) => b.userId === userId && b.status === 'PENDING'
-    ).length;
+    // 7. Enforce per-user max pending bets
+    const userBetCount = this.getUserPendingBetCount(userId);
     if (userBetCount >= this.config.maxBetsPerUser) {
       throw new GameError(ERROR_CODES.MAX_BETS_REACHED, '鐎规瓕灏幓顏堝礆閻楀牊浠樺鍫嗗嫬顫屾繛澶堝妽閺嗙喖??');
     }
 
-    // 7. 閻犱緤绱曢悾濠氬磹瀹ュ洤鑺?
+    // 8. Calculate multiplier
     const multiplier = calculateMultiplier(
       request.targetRow,
       this.state.currentRow,
@@ -597,22 +673,7 @@ export class GameEngine extends EventEmitter {
       throw new GameError(ERROR_CODES.INVALID_AMOUNT, '闁哄啰濮甸弲銉╂儍閸曨偀鍋撳鍥ц??');
     }
 
-    const riskAssessment = this.riskManager.assessBet({
-      activeBets: this.state.activeBets.values(),
-      poolBalance: await this.getPoolBalance(),
-      amount: request.amount,
-      multiplier,
-      baseMaxBet: this.config.maxBetAmount,
-    });
-
-    if (!riskAssessment.allowed || request.amount > riskAssessment.maxBetAllowed) {
-      throw new GameError(
-        ERROR_CODES.INVALID_AMOUNT,
-        `Bet amount exceeds current risk limit: ${this.config.minBetAmount}-${riskAssessment.maxBetAllowed}`
-      );
-    }
-
-    // 8. 閻犱降鍨瑰畷鐑瓺濡ょ姴鐭侀??
+    // 9. Validate orderId
     if (!request.orderId || typeof request.orderId !== 'string' || request.orderId.trim() === '') {
       throw new GameError(ERROR_CODES.INVALID_AMOUNT, '閻犱降鍨瑰畷鐑瓺濞戞挸绉烽崗妯荤▔閾忓厜??');
     }
@@ -635,21 +696,25 @@ export class GameEngine extends EventEmitter {
       return Boolean(err && typeof err === 'object' && (err as { code?: string }).code === 'P2002');
     };
 
-    // 9. 妤犵偛鍊婚悺鎴﹀箑瑜庨ˉ鍛村蓟閵夘垳绐楅柛蹇撶墛閻擄紕鎷犻。鏅俤erId闁哄嫷鍨伴幆浣割啅閹绘帞鎽犻??
+    // 10. Idempotency: handle duplicate orderId
     const existingBet = await this.prisma.bet.findUnique({
       where: { orderId },
     });
 
     if (existingBet) {
       assertBetOwnership(existingBet);
+      this.maybeTrackExistingDbBet(existingBet, orderId);
       console.log(`[GameEngine] Duplicate bet request: ${orderId}`);
       return buildBetResponse(existingBet);
     }
 
-    // 8. 闁告帒妫楃粩宄邦嚕韫囨稒??
+    // 11. Acquire bet lock (Redis best-effort)
     let lockAcquired = false;
     let betLockToken: string | null = null;
     let redisDegraded = false;
+    let payoutReservation: Awaited<ReturnType<RiskManager['reserveExpectedPayout']>> | null = null;
+    const riskTtlMs = (this.config.maxDuration + 60) * 1000;
+    let betCreated = false;
 
     try {
       betLockToken = await this.lockManager.acquireBetLock(orderId, 30000);
@@ -679,9 +744,29 @@ export class GameEngine extends EventEmitter {
     };
 
     try {
-      // 9. 闁告鍠庨悺娆撳箥閿濆棭??+ 閻犱焦婢樼紞宥夊箮閺囩喐鏆堥柨娑樼墕鐏忓爼宕ュ鍥ㄦ殢闁规挳鏀遍悥鍫曟偝閳哄伆浣割嚕韫囨氨鍎查弶鈺佹处閺嗙喖骞戦鑲╂皑闁瑰灝绉崇紞鏃堟晬?
+      if (!request.isPlayMode) {
+        const poolBalance = await this.getPoolBalance();
+        const maxRoundPayout = this.riskManager.getMaxRoundPayout(poolBalance);
+        const projectedPayout = this.riskManager.calculateProjectedPayout(request.amount, multiplier);
+        // House pool already receives the stake amount on bet placement, so the incremental liability we
+        // need to reserve is the net payout (gross payout - stake).
+        const expectedPayout = roundMoney(Math.max(0, projectedPayout - request.amount));
+
+        payoutReservation = await this.riskManager.reserveExpectedPayout({
+          redis: this.redis,
+          roundId,
+          orderId,
+          expectedPayout,
+          maxRoundPayout,
+          ttlMs: riskTtlMs,
+        });
+
+        if (!payoutReservation.allowed) {
+          throw new GameError(ERROR_CODES.INVALID_AMOUNT, 'Bet exceeds risk limits');
+        }
+      }
+
       const bet = await this.prisma.$transaction(async (tx) => {
-        // 闁革负鍔嬬花銊╁礉閳ュ啿鏁跺ù婊冩湰椤愬ジ寮介敓鐘靛矗闁搞儳鍋涢幃搴ㄦ偐閼哥??闂傚啫寮堕娑欑▔瀹稿潱dRound妤犵偠娉涜ぐ?
         const currentRound = await tx.round.findUnique({
           where: { id: roundId },
           select: { status: true },
@@ -691,7 +776,6 @@ export class GameEngine extends EventEmitter {
           throw new GameError(ERROR_CODES.BETTING_CLOSED, '闁搞儳鍋涢幃搴☆啅閹绘帒褰犻梻鍌ゅ幗閸ㄣ劍绋夊鍛憼闁?');
         }
 
-        // 闁告牕鐏濋幃鏇㈡偨閵婏箑鐓曢柛娆樹海閸忔ê銆掗崫銉ヨ礋婵☆垪鈧磭纭€闁挎稑鐭侀悜锔芥交閸ワ妇绋囧Λ鐗堢箖椤ュ懘寮?
 
         // Create bet first so we can reliably attach relatedBetId for the BET transaction.
         const newBet = await tx.bet.create({
@@ -711,7 +795,6 @@ export class GameEngine extends EventEmitter {
           },
         });
 
-        // 闂傚牏鍋涚亸鍫曞触瀹ュ洦鏆忛柟瀵稿厴濞撳墎鎲版担鐟扳拸婵炲棙鎷濈槐娆愭媴鐠恒劍??FinancialService??
         if (!isAnonymous) {
           const result = await this.financialService.conditionalChangeBalance(
             {
@@ -739,11 +822,11 @@ export class GameEngine extends EventEmitter {
           );
         }
 
-        // 闁告帗绋戠紓鎾诲箮閺囩喐鏆堥悹浣规緲缂嶅秹鏁嶉崼婵嗙樁闁告氨骞坮derId??
         return newBet;
       });
 
-      // 9. 婵烇綀顕ф慨鐐哄礆閻楀牊銇熼悹鍝勫暞婵洤鈻旈妸锔炬建
+      betCreated = true;
+
       const serverBet: ServerBet = {
         id: bet.id,
         orderId: request.orderId,
@@ -757,10 +840,8 @@ export class GameEngine extends EventEmitter {
         isPlayMode: request.isPlayMode ?? false,
       };
 
-      this.state.activeBets.set(bet.id, serverBet);
-      this.heapPush(serverBet);
+      this.trackActiveBet(serverBet, { pushToHeap: true });
 
-      // 10. 闁告艾鏈鐐哄??Redis闁挎稑鐗嗙槐鎾愁潰閵夘垳绀?
       setImmediate(() => {
         if (!this.state || this.state.roundId !== roundId) return;
 
@@ -773,7 +854,6 @@ export class GameEngine extends EventEmitter {
           .catch((err) => console.error('[GameEngine] Redis sync failed:', err));
       });
 
-      // 11. 闁兼儳鍢茶ぐ鍥嫉閳ь剟寮０浣虹▏濡増绻愮槐娆撳礌閸喗鍊抽柣顫妽閸╂稒娼婚弬鎸庣 0??
       let newBalance = 0;
       if (!isAnonymous) {
         const user = await this.prisma.user.findUnique({
@@ -785,7 +865,6 @@ export class GameEngine extends EventEmitter {
           : Number(user?.balance ?? 0);
       }
 
-      // 12. 妤犵偞瀵ч幐閬嶅箮閺囩喐鏆堢痪顓у枦椤撳鏁嶉崼婵嗙樁??userId 闁告粌濂旂紞鎴烇紣濠靛懍绻嗛柟顓у灣閺併倖绂嶆惔锛勬毎闁告碍鍨佃ぐ鍌炴焻娓氬﹦绀?
       this.emit('bet:confirmed', {
         userId,
         orderId: request.orderId,
@@ -806,7 +885,6 @@ export class GameEngine extends EventEmitter {
         targetRow: request.targetRow,
       };
     } catch (error) {
-      // 濠㈡儼绮剧憴锕傚籍閸撲胶褰岄柛妤佸▕閸ｆ挳寮ㄦィ鍐╂??
       await releaseLock();
 
       if (isUniqueConstraintError(error)) {
@@ -816,6 +894,7 @@ export class GameEngine extends EventEmitter {
 
         if (conflictingBet) {
           assertBetOwnership(conflictingBet);
+          this.maybeTrackExistingDbBet(conflictingBet, orderId);
           if (redisDegraded) {
             console.warn(
               `[GameEngine] Redis degraded; DB unique constraint hit for order ${orderId}, returning existing bet`
@@ -833,14 +912,164 @@ export class GameEngine extends EventEmitter {
         console.warn(`[GameEngine] DB unique constraint hit but bet not found for order ${orderId}`);
       }
 
+      if (payoutReservation?.didReserve && !betCreated && !request.isPlayMode) {
+        await this.releaseExpectedPayoutReservation(roundId, orderId);
+      }
+
       throw error;
     }
-    // 闁瑰瓨鍔曟慨娑㈠籍閹偊鍞ㄩ梺澶告祰閸ゆ粓鎮為幆鎵畺闁哄牏鍣︾槐婵嬫焼閸喖甯抽梺鎻掔Т椤﹁尙鎷犻柨瀣??
   }
 
   /**
-   * 闁硅埖娲橀弫鐐达紣閹寸姴鑺抽梻鍕姇閸╂螞閳ь剟寮?
+   * 释放风控预留的预期赔付（best-effort）
    */
+  private async releaseExpectedPayoutReservation(roundId: string, orderId: string): Promise<void> {
+    try {
+      await this.riskManager.releaseExpectedPayout({
+        redis: this.redis,
+        roundId,
+        orderId,
+        ttlMs: (this.config.maxDuration + 60) * 1000,
+      });
+    } catch (error) {
+      console.error(
+        `[GameEngine] Failed to release expected payout reservation for order ${orderId} (round ${roundId}):`,
+        error
+      );
+    }
+  }
+
+  private async handleBetSettled(payload: {
+    betId: string;
+    orderId: string;
+    userId: string;
+    isWin: boolean;
+    payout: number;
+    hitDetails?: unknown;
+  }): Promise<void> {
+    const roundId = this.state?.roundId;
+    if (roundId) {
+      await this.releaseExpectedPayoutReservation(roundId, payload.orderId);
+    }
+
+    this.emit('bet:settled', payload);
+  }
+
+  private syncPendingBetCounts(): void {
+    if (!this.state) {
+      this.pendingBetCountsByUser.clear();
+      this.pendingBetCountsRoundId = null;
+      this.pendingBetCountsActiveBetsSize = 0;
+      return;
+    }
+
+    const roundId = this.state.roundId;
+    const activeBetsSize = this.state.activeBets.size;
+
+    if (this.pendingBetCountsRoundId === roundId && this.pendingBetCountsActiveBetsSize === activeBetsSize) {
+      return;
+    }
+
+    this.pendingBetCountsByUser.clear();
+    for (const bet of this.state.activeBets.values()) {
+      if (bet.status !== 'PENDING') continue;
+      this.pendingBetCountsByUser.set(bet.userId, (this.pendingBetCountsByUser.get(bet.userId) ?? 0) + 1);
+    }
+
+    this.pendingBetCountsRoundId = roundId;
+    this.pendingBetCountsActiveBetsSize = activeBetsSize;
+  }
+
+  private getUserPendingBetCount(userId: string): number {
+    this.syncPendingBetCounts();
+    return this.pendingBetCountsByUser.get(userId) ?? 0;
+  }
+
+  private incrementUserPendingBetCount(userId: string): void {
+    if (!this.state) return;
+    this.syncPendingBetCounts();
+    this.pendingBetCountsByUser.set(userId, (this.pendingBetCountsByUser.get(userId) ?? 0) + 1);
+  }
+
+  private decrementUserPendingBetCount(userId: string): void {
+    if (!this.state) return;
+    this.syncPendingBetCounts();
+    const current = this.pendingBetCountsByUser.get(userId) ?? 0;
+    if (current <= 1) {
+      this.pendingBetCountsByUser.delete(userId);
+      return;
+    }
+    this.pendingBetCountsByUser.set(userId, current - 1);
+  }
+
+  private trackActiveBet(bet: ServerBet, options: { pushToHeap?: boolean } = {}): void {
+    if (!this.state) return;
+
+    this.syncPendingBetCounts();
+
+    const existing = this.state.activeBets.get(bet.id);
+    if (existing) {
+      if (options.pushToHeap && existing.status === 'PENDING' && !this.betHeap.some((b) => b.id === existing.id)) {
+        this.heapPush(existing);
+      }
+      return;
+    }
+
+    this.state.activeBets.set(bet.id, bet);
+    this.pendingBetCountsActiveBetsSize = this.state.activeBets.size;
+
+    if (bet.status === 'PENDING') {
+      this.incrementUserPendingBetCount(bet.userId);
+      if (options.pushToHeap && !this.betHeap.some((b) => b.id === bet.id)) {
+        this.heapPush(bet);
+      }
+    }
+  }
+
+  private maybeTrackExistingDbBet(dbBet: unknown, fallbackOrderId: string): void {
+    if (!this.state || !dbBet || typeof dbBet !== 'object') return;
+
+    const raw = dbBet as {
+      id?: unknown;
+      orderId?: unknown;
+      userId?: unknown;
+      roundId?: unknown;
+      amount?: unknown;
+      multiplier?: unknown;
+      targetRow?: unknown;
+      targetTime?: unknown;
+      status?: unknown;
+      isPlayMode?: unknown;
+      createdAt?: unknown;
+    };
+
+    if (typeof raw.id !== 'string' || typeof raw.userId !== 'string') return;
+
+    const roundId = typeof raw.roundId === 'string' ? raw.roundId : null;
+    if (!roundId || roundId !== this.state.roundId) return;
+
+    const status = typeof raw.status === 'string' ? raw.status : null;
+    if (status !== 'PENDING' && status !== 'SETTLING') return;
+
+    const orderId =
+      typeof raw.orderId === 'string' && raw.orderId.trim() !== '' ? raw.orderId : fallbackOrderId;
+
+    const serverBet: ServerBet = {
+      id: raw.id,
+      orderId,
+      userId: raw.userId,
+      amount: Number(raw.amount ?? 0),
+      multiplier: Number(raw.multiplier ?? 0),
+      targetRow: Number(raw.targetRow ?? 0),
+      targetTime: Number(raw.targetTime ?? 0),
+      placedAt: raw.createdAt instanceof Date ? raw.createdAt.getTime() : Date.now(),
+      status: status as ServerBet['status'],
+      isPlayMode: Boolean(raw.isPlayMode),
+    };
+
+    this.trackActiveBet(serverBet, { pushToHeap: serverBet.status === 'PENDING' });
+  }
+
   private async checkRateLimit(userId: string): Promise<boolean> {
     const configuredWindowMs = Number.parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '', 10);
     const windowMs = Number.isFinite(configuredWindowMs) && configuredWindowMs > 0 ? configuredWindowMs : 1000;
@@ -852,7 +1081,7 @@ export class GameEngine extends EventEmitter {
     });
   }
 
-  // ========== Tick 鐎甸偊浜為獮?==========
+  // ========== Tick Loop ==========
 
   private startTickLoop(): void {
     this.tickTimer = setInterval(() => this.tick(), this.config.tickInterval);
@@ -866,7 +1095,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 闁哄秶顭堢缓?Tick 鐎甸偊浜為獮?- 濞达綀娉曢弫銈夊嫉閳ь剛浜歌箛鎾跺灮濞村吋锚??
+   * Tick：更新 elapsed/price/row，并把到期下注推入结算队列
    */
   private tick(): void {
     if (!this.state || this.state.status === 'SETTLING' || this.state.status === 'COMPLETED') {
@@ -893,6 +1122,7 @@ export class GameEngine extends EventEmitter {
         this.heapPop();
         if (bet.status === 'PENDING') {
           toSettle.push({ bet, isWin: false });
+          this.decrementUserPendingBetCount(bet.userId);
           bet.status = 'SETTLING';
         }
         continue;
@@ -915,6 +1145,7 @@ export class GameEngine extends EventEmitter {
                 hitTime: this.state.elapsed,
               },
             });
+            this.decrementUserPendingBetCount(bet.userId);
             bet.status = 'SETTLING';
           }
           continue;
@@ -964,6 +1195,7 @@ export class GameEngine extends EventEmitter {
       const rowDiff = Math.abs(this.state!.currentRow - bet.targetRow);
       const isWin = timeDiff <= HIT_TIME_TOLERANCE && rowDiff <= this.config.hitTolerance;
 
+      this.decrementUserPendingBetCount(bet.userId);
       bet.status = 'SETTLING';
 
       toSettle.push({
@@ -985,10 +1217,10 @@ export class GameEngine extends EventEmitter {
   }
 
 
-  // ========== 閺夊牆鎳庢慨顏堝棘鐟欏嫮??==========
+  // ========== Internal Helpers ==========
 
   /**
-   * 缂傚倹鎸搁崯鎸庣闁垮澹愰煫鍥跺亞??
+   * 节流事件发送（同事件在 intervalMs 内最多发送一次）
    */
   private emitThrottled(event: string, data: unknown, intervalMs = 50): void {
     const now = Date.now();
@@ -1001,7 +1233,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 闁告艾鏈鐐烘偐閼哥鍋撴担绋跨厒 Redis
+   * 同步当前回合状态到 Redis
    */
   private async syncStateToRedis(): Promise<void> {
     if (!this.state) return;
@@ -1016,7 +1248,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 閻犱緤绱曢悾濠氬炊閻愬弶鍊ょ紓浣哄枙??
+   * 解析资金池初始余额（来自环境变量）
    */
   private resolveInitialPoolBalance(): number {
     const envBalance = process.env.HOUSE_POOL_BALANCE ?? process.env.GAME_POOL_BALANCE ?? '100000';
@@ -1054,7 +1286,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 濠㈣泛瀚幃濠冪闁垮澹愬☉鎾崇Т瑜版煡鎮?
+   * 价格源不可用时的处理（取消回合）
    */
   private handlePriceUnavailable(): void {
     if (this.state && (this.state.status === 'RUNNING' || this.state.status === 'BETTING')) {
@@ -1064,19 +1296,22 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 婵炴挸鎳愰幃濠勬導閸曨剛??
+   * 清理内存状态
    */
   private cleanup(): void {
     this.state = null;
     this.snapshotService.resetBuffer();
     this.settlementService.resetQueue();
     this.betHeap = [];
+    this.pendingBetCountsByUser.clear();
+    this.pendingBetCountsRoundId = null;
+    this.pendingBetCountsActiveBetsSize = 0;
   }
 
-  // ========== 闁哄牃鍋撻悘蹇撶箰閻栥垽骞欏鍕▕ ==========
+  // ========== Bet Heap (by targetTime) ==========
 
   /**
-   * 闁圭粯甯掗崣鍡涘箮閺囩喐鏆堥柛鎺斿濞撳墎浜歌箛鎾跺灮闁挎稑鐗婄??targetTime 闁圭儤甯掔花顓㈡??
+   * 将 bet 放入最小堆（按 targetTime）
    */
   private heapPush(bet: ServerBet): void {
     this.betHeap.push(bet);
@@ -1084,7 +1319,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 鐎殿喚鎳撻崵顓㈠醇閸℃稏鈧﹪骞庨弴鐔告??
+   * 弹出 targetTime 最小的 bet
    */
   private heapPop(): ServerBet | undefined {
     if (this.betHeap.length === 0) return undefined;
@@ -1097,7 +1332,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 濞戞挸锕ョ拠鐐哄箼瀹ュ嫮绋?
+   * 最小堆上浮
    */
   private heapifyUp(idx: number): void {
     while (idx > 0) {
@@ -1109,7 +1344,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 濞戞挸顑嗛惌鍥箼瀹ュ嫮绋?
+   * 最小堆下沉
    */
   private heapifyDown(idx: number): void {
     const len = this.betHeap.length;
@@ -1132,7 +1367,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 闁稿绮嶉娑橆嚕閺囩喐??
+   * 停止引擎（停止 tick/自动回合，并取消当前回合）
    */
   async stop(): Promise<void> {
     this.stopTickLoop();
@@ -1147,15 +1382,14 @@ export class GameEngine extends EventEmitter {
     console.log('[GameEngine] Stopped');
   }
 
-  // ========== 闁煎浜滄慨鈺呭炊閻愬弶鍊ょ紒鐙呯磿??==========
+  // ========== Auto-Round ==========
 
   private autoRoundTimer: ReturnType<typeof setTimeout> | null = null;
   private autoRoundEnabled = false;
   private boundScheduleNextRound: ((delayMs: number) => void) | null = null;
 
   /**
-   * 闁告凹鍨版慨鈺呮嚊椤忓嫬袟闁搞儳鍋涢幃搴☆嚗椤忓棗绠?
-   * 闁搞儳鍋涢幃搴ｇ磼閹惧瓨灏嗛柛姘唉閸ゆ粓宕濋妸銉х；濠殿喖顑勭粭鍛▔閳ь剟宕堕悙鍙夊??
+   * 启用自动开局（回合结束/取消后自动调度下一回合）
    */
   startAutoRound(delayMs = 3000): void {
     if (this.autoRoundEnabled) return;
@@ -1163,19 +1397,19 @@ export class GameEngine extends EventEmitter {
     this.autoRoundEnabled = true;
     console.log('[GameEngine] Auto-round enabled');
 
-    // 闁告帗绋戠紓鎾剁磼閹存繄鏆伴柣銊ュ閸ら亶寮弶璺ㄧ┛闁?濞寸姰鍎扮粚鍫曞触鎼达絿鏁剧紒澶婎煼??
+    // Bind handler for auto-round scheduling
     this.boundScheduleNextRound = () => this.scheduleNextRound(delayMs);
 
-    // 闁烩晜鍨甸幆澶愬炊閻愬弶鍊ょ紓浣规尰濞碱偅绂嶇€ｂ晜??
+    // Re-schedule after round end/cancel
     this.on('round:end', this.boundScheduleNextRound);
     this.on('round:cancelled', this.boundScheduleNextRound);
 
-    // 鐎点倖鍎肩换婊堝触椤栨艾袟缂佹鍏涚粩鎾炊閻愬弶鍊ら柨娑樼灱缁増绂掗柨瀣闁哄牆绉存慨鐔煎籍閸洘锛熼柛鎴濇椤?
+    // Start the first round soon
     this.scheduleNextRound(1000);
   }
 
   /**
-   * 闁稿绮嶉娑㈡嚊椤忓嫬袟闁搞儳鍋涢幃搴☆嚗椤忓棗绠?
+   * 关闭自动开局
    */
   stopAutoRound(): void {
     this.autoRoundEnabled = false;
@@ -1185,7 +1419,7 @@ export class GameEngine extends EventEmitter {
       this.autoRoundTimer = null;
     }
 
-    // 闁告瑯浜炰簺闂傚嫨鍊涢崵婊堝礉閵娿儲绀€闁告艾鐗忓ù澶愬礂瀹曞洦鐣遍柣鈺傚灥閹??
+    // Remove auto-round listeners
     if (this.boundScheduleNextRound) {
       this.off('round:end', this.boundScheduleNextRound);
       this.off('round:cancelled', this.boundScheduleNextRound);
@@ -1196,7 +1430,7 @@ export class GameEngine extends EventEmitter {
   }
 
   /**
-   * 閻庣懓顦扮敮鎾寸▔鐎ｂ晝顏遍柛銉у仜閹?
+   * 调度下一回合（自动开局）
    */
   private scheduleNextRound(delayMs: number): void {
     if (!this.autoRoundEnabled) return;
@@ -1210,7 +1444,7 @@ export class GameEngine extends EventEmitter {
         await this.startRound();
       } catch (error) {
         console.error('[GameEngine] Failed to start next round:', error);
-        // 闂佹彃绉烽惁?
+        // Backoff and retry
         this.scheduleNextRound(5000);
       }
     }, delayMs);

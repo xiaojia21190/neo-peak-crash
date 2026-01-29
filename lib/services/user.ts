@@ -34,17 +34,19 @@ export async function getOrCreateUser(userData: {
   active?: boolean;
   silenced?: boolean;
 }): Promise<UserData> {
+  const updateData = {
+    username: userData.username,
+    name: userData.name,
+    avatar: userData.avatar,
+    trustLevel: userData.trustLevel ?? 0,
+    lastLoginAt: new Date(),
+    ...(userData.active !== undefined ? { active: userData.active } : {}),
+    ...(userData.silenced !== undefined ? { silenced: userData.silenced } : {}),
+  };
+
   const user = await prisma.user.upsert({
     where: { id: userData.id },
-    update: {
-      username: userData.username,
-      name: userData.name,
-      avatar: userData.avatar,
-      trustLevel: userData.trustLevel ?? 0,
-      active: userData.active ?? true,
-      silenced: userData.silenced ?? false,
-      lastLoginAt: new Date(),
-    },
+    update: updateData,
     create: {
       id: userData.id,
       username: userData.username,
@@ -127,69 +129,10 @@ export async function updateUserBalanceWithLedger(params: {
 }
 
 /**
- * 更新用户余额（旧版本，保留兼容性）
- * @deprecated 使用 updateUserBalanceWithLedger 代替
- */
-export async function updateUserBalance(
-  userId: string,
-  amount: number,
-  isPlayMode: boolean
-): Promise<{ balance: number; playBalance: number } | null> {
-  if (amount < 0) {
-    const result = await financialService.conditionalChangeBalance({
-      userId,
-      amount,
-      type: "BET",
-      isPlayMode,
-    });
-
-    if (!result.success) return null;
-  } else if (amount > 0) {
-    await financialService.changeBalance({
-      userId,
-      amount,
-      type: "WIN",
-      isPlayMode,
-    });
-  } else {
-    // no-op
-  }
-
-  return financialService.getBalance(userId);
-}
-
-/**
  * 重置游戏模式余额
  */
 export async function resetPlayBalance(userId: string): Promise<number> {
   return financialService.setPlayBalance(userId, 10000);
-}
-
-/**
- * 记录投注
- */
-export async function recordBet(data: {
-  userId: string;
-  amount: number;
-  multiplier: number;
-  rowIndex: number;
-  colIndex: number;
-  asset: string;
-  isPlayMode: boolean;
-}): Promise<string> {
-  const bet = await prisma.bet.create({
-    data: {
-      userId: data.userId,
-      amount: data.amount,
-      multiplier: data.multiplier,
-      rowIndex: data.rowIndex,
-      colIndex: data.colIndex,
-      asset: data.asset,
-      isPlayMode: data.isPlayMode,
-    },
-  });
-
-  return bet.id;
 }
 
 /**
@@ -262,25 +205,6 @@ export async function settleBetSecure(
       payout,
     },
   };
-}
-
-/**
- * 结算投注（旧版本，保留兼容性）
- * @deprecated 使用 settleBetSecure 代替
- */
-export async function settleBet(
-  betId: string,
-  isWin: boolean,
-  payout: number
-): Promise<void> {
-  await prisma.bet.update({
-    where: { id: betId },
-    data: {
-      isWin,
-      payout: payout,
-      settledAt: new Date(),
-    },
-  });
 }
 
 /**

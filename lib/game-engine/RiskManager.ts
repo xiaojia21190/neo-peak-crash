@@ -1,3 +1,4 @@
+import type { Redis } from 'ioredis';
 import { roundMoney } from '../shared/gameMath';
 
 export type RiskBet = {
@@ -22,6 +23,19 @@ export type RiskAssessment = {
   metrics: RiskMetrics;
 };
 
+export type ExpectedPayoutReservation = {
+  allowed: boolean;
+  didReserve: boolean;
+  reservedTotal: number;
+  reservedForOrder: number;
+};
+
+export type ExpectedPayoutRelease = {
+  released: boolean;
+  reservedTotal: number;
+  releasedAmount: number;
+};
+
 export class RiskManager {
   private readonly maxRoundPayout?: number;
   private readonly maxRoundPayoutRatio: number;
@@ -30,6 +44,15 @@ export class RiskManager {
     this.maxRoundPayout = options.maxRoundPayout;
     const ratio = options.maxRoundPayoutRatio ?? Number(process.env.MAX_ROUND_PAYOUT ?? '0.15');
     this.maxRoundPayoutRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 0;
+  }
+
+  getMaxRoundPayout(poolBalance: number): number {
+    return this.resolveMaxRoundPayout(poolBalance);
+  }
+
+  calculateProjectedPayout(amount: number, multiplier: number): number {
+    if (!Number.isFinite(amount) || !Number.isFinite(multiplier)) return 0;
+    return roundMoney(amount * multiplier);
   }
 
   calculateMetrics(activeBets: Iterable<RiskBet>, poolBalance: number): RiskMetrics {
@@ -102,10 +125,156 @@ export class RiskManager {
     };
   }
 
+  async reserveExpectedPayout(params: {
+    redis: Redis;
+    roundId: string;
+    orderId: string;
+    expectedPayout: number;
+    maxRoundPayout: number;
+    ttlMs: number;
+  }): Promise<ExpectedPayoutReservation> {
+    const expectedPayout = roundMoney(params.expectedPayout);
+    const maxRoundPayout = roundMoney(params.maxRoundPayout);
+    const ttlMs = Math.max(1000, Math.floor(params.ttlMs));
+
+    if (!Number.isFinite(expectedPayout) || expectedPayout <= 0) {
+      return { allowed: false, didReserve: false, reservedTotal: 0, reservedForOrder: 0 };
+    }
+
+    if (!Number.isFinite(maxRoundPayout) || maxRoundPayout <= 0) {
+      return { allowed: false, didReserve: false, reservedTotal: 0, reservedForOrder: 0 };
+    }
+
+    const reservedKey = this.buildReservedExpectedPayoutKey(params.roundId);
+    const reservationKey = this.buildOrderReservationKey(params.roundId, params.orderId);
+
+    const script = `
+      -- risk:reserve_expected_payout
+      local reservedKey = KEYS[1]
+      local reservationKey = KEYS[2]
+
+      local maxPayout = tonumber(ARGV[1])
+      local delta = tonumber(ARGV[2])
+      local ttl = tonumber(ARGV[3])
+
+      local existing = redis.call("get", reservationKey)
+      if existing then
+        local total = tonumber(redis.call("get", reservedKey) or "0")
+        return {1, 0, total, tonumber(existing)}
+      end
+
+      local current = tonumber(redis.call("get", reservedKey) or "0")
+      if current + delta > maxPayout + 0.000001 then
+        return {0, 0, current, 0}
+      end
+
+      local nextTotal = current + delta
+      redis.call("set", reservedKey, nextTotal, "PX", ttl)
+      redis.call("set", reservationKey, delta, "PX", ttl)
+      return {1, 1, nextTotal, delta}
+    `;
+
+    const result = (await params.redis.eval(
+      script,
+      2,
+      reservedKey,
+      reservationKey,
+      maxRoundPayout.toString(),
+      expectedPayout.toString(),
+      ttlMs.toString()
+    )) as unknown;
+
+    const parsed = Array.isArray(result) ? result : [];
+    const allowed = Number(parsed[0]) === 1;
+    const didReserve = Number(parsed[1]) === 1;
+    const reservedTotal = roundMoney(Number(parsed[2] ?? 0));
+    const reservedForOrder = roundMoney(Number(parsed[3] ?? 0));
+
+    return {
+      allowed,
+      didReserve,
+      reservedTotal: Number.isFinite(reservedTotal) ? reservedTotal : 0,
+      reservedForOrder: Number.isFinite(reservedForOrder) ? reservedForOrder : 0,
+    };
+  }
+
+  async releaseExpectedPayout(params: {
+    redis: Redis;
+    roundId: string;
+    orderId: string;
+    ttlMs: number;
+  }): Promise<ExpectedPayoutRelease> {
+    const ttlMs = Math.max(1000, Math.floor(params.ttlMs));
+    const reservedKey = this.buildReservedExpectedPayoutKey(params.roundId);
+    const reservationKey = this.buildOrderReservationKey(params.roundId, params.orderId);
+
+    const script = `
+      -- risk:release_expected_payout
+      local reservedKey = KEYS[1]
+      local reservationKey = KEYS[2]
+
+      local ttl = tonumber(ARGV[1])
+
+      local existing = redis.call("get", reservationKey)
+      if not existing then
+        local total = tonumber(redis.call("get", reservedKey) or "0")
+        return {0, total, 0}
+      end
+
+      local delta = tonumber(existing)
+      local current = tonumber(redis.call("get", reservedKey) or "0")
+      local nextTotal = current - delta
+      if nextTotal < 0 then nextTotal = 0 end
+
+      redis.call("set", reservedKey, nextTotal, "PX", ttl)
+      redis.call("del", reservationKey)
+      return {1, nextTotal, delta}
+    `;
+
+    const result = (await params.redis.eval(script, 2, reservedKey, reservationKey, ttlMs.toString())) as unknown;
+    const parsed = Array.isArray(result) ? result : [];
+    const released = Number(parsed[0]) === 1;
+    const reservedTotal = roundMoney(Number(parsed[1] ?? 0));
+    const releasedAmount = roundMoney(Number(parsed[2] ?? 0));
+
+    return {
+      released,
+      reservedTotal: Number.isFinite(reservedTotal) ? reservedTotal : 0,
+      releasedAmount: Number.isFinite(releasedAmount) ? releasedAmount : 0,
+    };
+  }
+
+  buildReservedExpectedPayoutKey(roundId: string): string {
+    return `game:risk:expected_payout:${roundId}`;
+  }
+
+  buildOrderReservationKey(roundId: string, orderId: string): string {
+    return `game:risk:expected_payout:${roundId}:order:${orderId}`;
+  }
+
+  calculateMaxBetFromRemainingPayoutCapacity(params: {
+    remainingPayoutCapacity: number;
+    multiplier: number;
+    baseMaxBet: number;
+  }): number {
+    const metrics: RiskMetrics = {
+      totalBetAmount: 0,
+      expectedPayout: 0,
+      poolBalance: 0,
+      maxRoundPayout: 0,
+      remainingPayoutCapacity: roundMoney(Math.max(0, params.remainingPayoutCapacity)),
+    };
+    return this.calculateMaxBetFromMetrics(metrics, params.multiplier, params.baseMaxBet);
+  }
+
   private resolveMaxRoundPayout(poolBalance: number): number {
     if (!Number.isFinite(poolBalance) || poolBalance <= 0) return 0;
-    const configured = this.maxRoundPayout ?? this.maxRoundPayoutRatio;
-    const maxPayout = configured <= 1 ? poolBalance * configured : configured;
+    if (this.maxRoundPayout !== undefined) {
+      return Math.max(0, roundMoney(this.maxRoundPayout));
+    }
+
+    const ratioOrAbsolute = this.maxRoundPayoutRatio;
+    const maxPayout = ratioOrAbsolute <= 1 ? poolBalance * ratioOrAbsolute : ratioOrAbsolute;
     return Math.max(0, roundMoney(maxPayout));
   }
 

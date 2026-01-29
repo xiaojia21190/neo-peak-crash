@@ -55,12 +55,15 @@ class FakePrisma {
   bet = {
     updateMany: async (args: any) => {
       const id = args?.where?.id as string | undefined;
-      const status = args?.where?.status as string | undefined;
+      const status = args?.where?.status as any;
       if (!id) throw new Error('Missing bet id');
 
       const bet = this.bets.get(id);
       if (!bet) return { count: 0 };
-      if (status && bet.status !== status) return { count: 0 };
+      if (status) {
+        if (typeof status === 'string' && bet.status !== status) return { count: 0 };
+        if (status.in && !status.in.includes(bet.status)) return { count: 0 };
+      }
       if (this.forceUpdateFail) return { count: 0 };
 
       Object.assign(bet, args.data ?? {});
@@ -68,20 +71,26 @@ class FakePrisma {
     },
     findMany: async (args: any) => {
       const roundId = args?.where?.roundId as string | undefined;
-      const status = args?.where?.status as string | undefined;
+      const status = args?.where?.status as any;
       return Array.from(this.bets.values()).filter((bet) => {
         if (roundId && bet.roundId !== roundId) return false;
-        if (status && bet.status !== status) return false;
+        if (status) {
+          if (typeof status === 'string' && bet.status !== status) return false;
+          if (status.in && !status.in.includes(bet.status)) return false;
+        }
         return true;
       });
     },
     count: async (args: any) => {
       if (this.forcedPendingCount !== null) return this.forcedPendingCount;
       const roundId = args?.where?.roundId as string | undefined;
-      const status = args?.where?.status as string | undefined;
+      const status = args?.where?.status as any;
       return Array.from(this.bets.values()).filter((bet) => {
         if (roundId && bet.roundId !== roundId) return false;
-        if (status && bet.status !== status) return false;
+        if (status) {
+          if (typeof status === 'string' && bet.status !== status) return false;
+          if (status.in && !status.in.includes(bet.status)) return false;
+        }
         return true;
       }).length;
     },
@@ -223,11 +232,113 @@ test('SettlementService.enqueue settles wins and emits callbacks', async () => {
   assert.equal(user?.totalBets, 1);
   assert.equal(user?.totalWins, 1);
   assert.equal(user?.totalLosses, 0);
-  assert.equal(user?.totalProfit, 10);
+  assert.equal(user?.totalProfit, 20);
 
   assert.equal(settled.length, 1);
   assert.equal(settled[0].betId, 'bet-1');
   assert.equal(settled[0].payout, 20);
+});
+
+test('SettlementService processes items enqueued while a batch is settling', async () => {
+  const prisma = new FakePrisma();
+  prisma.seedUser({
+    id: 'user-append',
+    totalBets: 0,
+    totalWins: 0,
+    totalLosses: 0,
+    totalProfit: 0,
+  });
+  prisma.seedBet({
+    id: 'bet-append-1',
+    roundId: 'round-append',
+    userId: 'user-append',
+    amount: 10,
+    multiplier: 2,
+    status: 'PENDING',
+    isPlayMode: false,
+    targetRow: 5,
+    targetTime: 1,
+  });
+  prisma.seedBet({
+    id: 'bet-append-2',
+    roundId: 'round-append',
+    userId: 'user-append',
+    amount: 10,
+    multiplier: 2,
+    status: 'PENDING',
+    isPlayMode: false,
+    targetRow: 5,
+    targetTime: 1,
+  });
+
+  const service = new SettlementService({
+    prisma: prisma as any,
+    financialService: new FakeFinancialService() as any,
+    housePoolService: new FakeHousePoolService() as any,
+    snapshotService: new FakeSnapshotService() as any,
+    asset: 'BTCUSDT',
+    hitTolerance: 1,
+  });
+
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const originalTransaction = prisma.$transaction.bind(prisma);
+  let firstTransaction = true;
+  (prisma as any).$transaction = async (fn: any) => {
+    if (firstTransaction) {
+      firstTransaction = false;
+      await gate;
+    }
+    return originalTransaction(fn);
+  };
+
+  service.enqueue([
+    {
+      bet: {
+        id: 'bet-append-1',
+        orderId: 'order-append-1',
+        userId: 'user-append',
+        amount: 10,
+        multiplier: 2,
+        targetRow: 5,
+        targetTime: 1,
+        placedAt: Date.now(),
+        status: 'PENDING',
+        isPlayMode: false,
+      },
+      isWin: true,
+    },
+  ]);
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  service.enqueue([
+    {
+      bet: {
+        id: 'bet-append-2',
+        orderId: 'order-append-2',
+        userId: 'user-append',
+        amount: 10,
+        multiplier: 2,
+        targetRow: 5,
+        targetTime: 1,
+        placedAt: Date.now(),
+        status: 'PENDING',
+        isPlayMode: false,
+      },
+      isWin: true,
+    },
+  ]);
+
+  release?.();
+
+  await service.flushQueue();
+
+  assert.equal(prisma.getBet('bet-append-1')?.status, 'WON');
+  assert.equal(prisma.getBet('bet-append-2')?.status, 'WON');
 });
 
 test('SettlementService.compensateUnsettledBets settles pending bets using snapshots', async () => {
@@ -315,6 +426,12 @@ test('SettlementService.compensateUnsettledBets settles pending bets using snaps
   const expectedEnd = roundStartTime + (5 + HIT_TIME_TOLERANCE) * 1000;
   assert.equal(snapshotService.calls[0].windowStart.getTime(), expectedStart);
   assert.equal(snapshotService.calls[0].windowEnd.getTime(), expectedEnd);
+
+  const user = prisma.getUser('user-2');
+  assert.equal(user?.totalBets, 1);
+  assert.equal(user?.totalWins, 1);
+  assert.equal(user?.totalLosses, 0);
+  assert.equal(user?.totalProfit, 15);
 });
 
 test('SettlementService.resolveHitBySnapshots detects hits within the window', async () => {
@@ -752,6 +869,12 @@ test('SettlementService retries pending bets and clears retry state', async () =
     'test'
   );
   assert.equal(scheduled, true);
+
+  const user = prisma.getUser('user-retry');
+  assert.equal(user?.totalBets, 1);
+  assert.equal(user?.totalWins, 1);
+  assert.equal(user?.totalLosses, 0);
+  assert.equal(user?.totalProfit, 10);
 });
 
 test('SettlementService retries after transient transaction failures', async () => {

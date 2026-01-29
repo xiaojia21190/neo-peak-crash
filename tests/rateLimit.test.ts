@@ -151,6 +151,24 @@ test('fallback: uses in-memory when redis is missing', async () => {
   assert.equal(await allowSlidingWindowRequest({ key, windowMs: 1000, maxRequests: 2, now: 1002 }), false);
 });
 
+test('fallback: in-memory window expires after TTL', async () => {
+  const key = 'rate:mem:ttl';
+
+  assert.equal(
+    await allowSlidingWindowRequest({ key, windowMs: 1000, maxRequests: 1, now: 0, redisEnabled: false }),
+    true
+  );
+  assert.equal(
+    await allowSlidingWindowRequest({ key, windowMs: 1000, maxRequests: 1, now: 999, redisEnabled: false }),
+    false
+  );
+  // Boundary: now=1000 => minTs=0, request at ts=0 expires.
+  assert.equal(
+    await allowSlidingWindowRequest({ key, windowMs: 1000, maxRequests: 1, now: 1000, redisEnabled: false }),
+    true
+  );
+});
+
 test('fallback: uses in-memory when redis throws', async () => {
   const key = 'rate:bet:user-4';
   const redis = {
@@ -179,6 +197,48 @@ test('fallback: uses in-memory when redis throws', async () => {
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test('redis: transaction aborted falls back to in-memory', async () => {
+  const key = 'rate:bet:user-6';
+  const redis = {
+    multi() {
+      return {
+        zremrangebyscore() { return this; },
+        zadd() { return this; },
+        zcard() { return this; },
+        pexpire() { return this; },
+        async exec() { return null; },
+      };
+    },
+  };
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(
+      await allowSlidingWindowRequest({ redis: redis as any, key, windowMs: 1000, maxRequests: 1, now: 1000 }),
+      true
+    );
+    assert.equal(
+      await allowSlidingWindowRequest({ redis: redis as any, key, windowMs: 1000, maxRequests: 1, now: 1001 }),
+      false
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('redis: ignore cleanup failure when rejecting', async () => {
+  const redis = new FakeRedis() as any;
+  redis.zrem = async () => {
+    throw new Error('cleanup down');
+  };
+
+  const key = 'rate:bet:user-7';
+  assert.equal(await allowSlidingWindowRequest({ redis, key, windowMs: 1000, maxRequests: 1, now: 1000 }), true);
+  assert.equal(await allowSlidingWindowRequest({ redis, key, windowMs: 1000, maxRequests: 1, now: 1001 }), false);
+  assert.equal(redis.zcardSync(key), 2);
 });
 
 test('options: redisEnabled=false forces in-memory (no redis calls)', async () => {
@@ -223,4 +283,105 @@ test('buildRateLimitKey: uses env prefix', () => {
 test('options: windowMs<=0 or maxRequests<=0 disables limiting', async () => {
   assert.equal(await allowSlidingWindowRequest({ key: 'k1', windowMs: 0, maxRequests: 1, now: 1 }), true);
   assert.equal(await allowSlidingWindowRequest({ key: 'k2', windowMs: 1000, maxRequests: 0, now: 1 }), true);
+});
+
+test('fallback: in-memory evicts oldest keys when exceeding max key count', async () => {
+  const windowMs = 1_000_000;
+  const maxRequests = 1;
+
+  for (let i = 0; i <= 10_000; i += 1) {
+    assert.equal(
+      await allowSlidingWindowRequest({
+        key: `rate:mem:evict:${i}`,
+        windowMs,
+        maxRequests,
+        now: i,
+        redisEnabled: false,
+      }),
+      true
+    );
+  }
+
+  assert.equal(
+    await allowSlidingWindowRequest({
+      key: 'rate:mem:evict:1',
+      windowMs,
+      maxRequests,
+      now: 10_001,
+      redisEnabled: false,
+    }),
+    false
+  );
+
+  assert.equal(
+    await allowSlidingWindowRequest({
+      key: 'rate:mem:evict:0',
+      windowMs,
+      maxRequests,
+      now: 10_001,
+      redisEnabled: false,
+    }),
+    true
+  );
+});
+
+test('fallback: starts periodic cleanup timer and unrefs it', async () => {
+  const originalSetInterval = globalThis.setInterval;
+
+  let unrefCalled = false;
+  let createdMs: number | undefined;
+  let intervalFn: (() => void) | null = null;
+  let intervalCalls = 0;
+
+  globalThis.setInterval = (((fn: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    intervalCalls += 1;
+    createdMs = ms;
+    intervalFn = () => fn(...args);
+
+    const handle = originalSetInterval(fn, ms, ...args) as unknown as { unref?: () => void };
+    if (handle && typeof handle.unref === 'function') {
+      const originalUnref = handle.unref.bind(handle);
+      handle.unref = () => {
+        unrefCalled = true;
+        originalUnref();
+      };
+    } else {
+      unrefCalled = true;
+    }
+
+    return handle as any;
+  }) as unknown) as typeof setInterval;
+
+  try {
+    assert.equal(
+      await allowSlidingWindowRequest({
+        key: 'rate:mem:timer',
+        windowMs: 1000,
+        maxRequests: 1,
+        now: 0,
+        redisEnabled: false,
+      }),
+      true
+    );
+
+    // Second call should not create a second timer.
+    await allowSlidingWindowRequest({
+      key: 'rate:mem:timer',
+      windowMs: 1000,
+      maxRequests: 1,
+      now: 1,
+      redisEnabled: false,
+    });
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+  }
+
+  assert.equal(createdMs, 60000);
+  assert.equal(unrefCalled, true);
+  assert.equal(intervalCalls, 1);
+  intervalFn?.();
+  resetInMemoryRateLimit();
+
+  // Ensure cleanup handles empty store (no throw).
+  intervalFn?.();
 });

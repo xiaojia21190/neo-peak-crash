@@ -5,7 +5,21 @@ import { EventEmitter } from 'node:events';
 import { io as clientIo, type Socket as ClientSocket } from 'socket.io-client';
 
 import { WebSocketGateway } from '../lib/game-engine/WebSocketGateway';
+import { PriceService } from '../lib/game-engine/PriceService';
 import { WS_EVENTS } from '../lib/game-engine/constants';
+import {
+  calculateAdjustedProbability,
+  calculateMultiplier,
+  CENTER_ROW_INDEX,
+  clampRowIndex,
+  isHitByTickSeries,
+  isValidMoneyAmount,
+  MAX_MULTIPLIER,
+  MAX_ROW_INDEX,
+  MIN_MULTIPLIER,
+  MIN_ROW_INDEX,
+  roundMoney,
+} from '../lib/shared/gameMath';
 
 class FakePriceService extends EventEmitter {
   async start(): Promise<void> {}
@@ -105,6 +119,17 @@ async function waitUntil(fn: () => boolean, timeoutMs = 2000): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, 10));
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<T>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`Timeout: ${label}`)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 function makeFakePrisma(args: {
@@ -270,14 +295,14 @@ test('anonymous connection: allowed but read-only, receives snapshot + legacy in
   const pong = await pongP;
   assert.equal(typeof pong.timestamp, 'number');
 
-  // read-only: place_bet rejected
+  // read-only: place_bet with isPlayMode=false rejected (真金投注需要登录)
   const rejectedP = waitForEvent<any>(socket, WS_EVENTS.BET_REJECTED);
   socket.emit(WS_EVENTS.PLACE_BET, {
     orderId: 'o1',
     amount: 1,
     targetRow: 6.5,
     targetTime: 2.1,
-    isPlayMode: true,
+    isPlayMode: false, // 真金投注需要登录
   });
   const rejected = await rejectedP;
   assert.equal(rejected.payload.code, 'UNAUTHORIZED');
@@ -557,6 +582,89 @@ test('state_request: can disable history and does not call history bet query', a
   );
 });
 
+test('historyLimit: clamps config + state_request override to 200', async (t) => {
+  const betFindManyCalls: any[] = [];
+
+  const prisma = {
+    user: { async findUnique() { return { id: 'u1', balance: 1, playBalance: 2 }; } },
+    bet: {
+      async findMany(q: any) {
+        betFindManyCalls.push(q);
+
+        if (q?.where?.roundId) return [];
+
+        const take = typeof q?.take === 'number' ? q.take : 0;
+        return Array.from({ length: take }, (_v, i) => ({
+          id: `b${i}`,
+          orderId: `o${i}`,
+          roundId: 'r0',
+          amount: 1,
+          multiplier: 1.5,
+          targetRow: 6.5,
+          targetTime: 1.1,
+          rowIndex: 7,
+          colIndex: 1,
+          status: 'PENDING',
+          isWin: false,
+          payout: 0,
+          isPlayMode: true,
+          hitPrice: null,
+          hitRow: null,
+          hitTime: null,
+          createdAt: new Date(0),
+          settledAt: null,
+        }));
+      },
+    },
+  };
+
+  const { httpServer, url, gateway } = await setupGateway({
+    allowedOrigin: 'http://localhost:3000',
+    gameState: {
+      roundId: 'r1',
+      status: 'BETTING',
+      asset: 'BTCUSDT',
+      startPrice: 100,
+      currentPrice: 100,
+      currentRow: 6.5,
+      elapsed: 0.1,
+      roundStartTime: 1000,
+    },
+    prisma,
+    verifyTokenFromCookie: async () => 'u1',
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 999 },
+  });
+
+  t.after(async () => {
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000', cookie: 'next-auth.session-token=good' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const authP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  const snapshotP = waitForEvent<any>(socket, WS_EVENTS.STATE_SNAPSHOT);
+  socket.connect();
+  await authP;
+  const snapshot = await snapshotP;
+
+  assert.equal(betFindManyCalls[0]?.take, 200);
+  assert.equal(snapshot.payload.user.recentBets.length, 200);
+
+  const nextSnapshotP = waitForEvent<any>(socket, WS_EVENTS.STATE_SNAPSHOT);
+  socket.emit(WS_EVENTS.STATE_REQUEST, { includeHistory: true, historyLimit: 999 });
+  const nextSnapshot = await nextSnapshotP;
+
+  assert.equal(betFindManyCalls[1]?.take, 200);
+  assert.equal(nextSnapshot.payload.user.recentBets.length, 200);
+});
+
 test('forwards GameEngine and PriceService events (including anon routing)', async (t) => {
   const { httpServer, url, gateway, fakeGameEngine, fakePriceService } = await setupGateway({
     allowedOrigin: 'http://localhost:3000',
@@ -785,6 +893,187 @@ test('placeBet input validation and error mapping', async (t) => {
   assert.equal((await errP).payload.code, 'INTERNAL_ERROR');
 });
 
+test('cors: accepts origin as a single string', async (t) => {
+  const httpServer = createServer();
+  const prisma = makeFakePrisma({});
+  const fakePriceService = new FakePriceService();
+  const fakeGameEngine = new FakeGameEngine(null, { asset: 'BTCUSDT', bettingDuration: 5, maxDuration: 60 });
+
+  const gateway = new WebSocketGateway(httpServer, {} as any, prisma as any, {
+    cors: { origin: 'http://localhost:3000', credentials: true },
+    heartbeat: { intervalMs: 50 },
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 0 },
+    deps: {
+      gameEngine: fakeGameEngine as any,
+      priceService: fakePriceService as any,
+      verifyToken: async () => null,
+      verifyTokenFromCookie: async () => null,
+    },
+  });
+
+  await gateway.start();
+  await new Promise<void>((resolve) => httpServer.listen(0, resolve));
+  const address = httpServer.address();
+  assert.ok(address && typeof address === 'object');
+  const url = `http://localhost:${address.port}`;
+
+  t.after(async () => {
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const authP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.connect();
+  await authP;
+
+  // idempotent heartbeat start
+  (gateway as any).startHeartbeat();
+});
+
+test('cors: uses WS_CORS_ORIGIN default when cors config is omitted', async (t) => {
+  const prevCorsOrigin = process.env.WS_CORS_ORIGIN;
+  process.env.WS_CORS_ORIGIN = 'http://localhost:3000';
+
+  const httpServer = createServer();
+  const prisma = makeFakePrisma({});
+  const fakePriceService = new FakePriceService();
+  const fakeGameEngine = new FakeGameEngine(null, { asset: 'BTCUSDT', bettingDuration: 5, maxDuration: 60 });
+
+  const gateway = new WebSocketGateway(httpServer, {} as any, prisma as any, {
+    heartbeat: { intervalMs: 50 },
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 0 },
+    deps: {
+      gameEngine: fakeGameEngine as any,
+      priceService: fakePriceService as any,
+      verifyToken: async () => null,
+      verifyTokenFromCookie: async () => null,
+    },
+  });
+
+  await gateway.start();
+  await new Promise<void>((resolve) => httpServer.listen(0, resolve));
+  const address = httpServer.address();
+  assert.ok(address && typeof address === 'object');
+  const url = `http://localhost:${address.port}`;
+
+  t.after(async () => {
+    if (prevCorsOrigin == null) delete process.env.WS_CORS_ORIGIN;
+    else process.env.WS_CORS_ORIGIN = prevCorsOrigin;
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const authP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.connect();
+  await authP;
+});
+
+test('auth: rejects invalid token payload', async (t) => {
+  const { httpServer, url, gateway } = await setupGateway({
+    allowedOrigin: 'http://localhost:3000',
+    gameState: {
+      roundId: 'r1',
+      status: 'BETTING',
+      asset: 'BTCUSDT',
+      startPrice: 100,
+      currentPrice: 100,
+      currentRow: 6.5,
+      elapsed: 0.1,
+      roundStartTime: 1000,
+    },
+    prisma: makeFakePrisma({}),
+    verifyToken: async () => 'u1',
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 0 },
+  });
+
+  t.after(async () => {
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const anonAuthP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.connect();
+  await anonAuthP;
+
+  const authResultP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.emit(WS_EVENTS.AUTH, { token: 123 as any });
+  const authResult = await authResultP;
+  assert.equal(authResult.payload.success, false);
+});
+
+test('auth: switching user id cleans up previous user room tracking', async (t) => {
+  const { httpServer, url, gateway } = await setupGateway({
+    allowedOrigin: 'http://localhost:3000',
+    gameState: {
+      roundId: 'r1',
+      status: 'BETTING',
+      asset: 'BTCUSDT',
+      startPrice: 100,
+      currentPrice: 100,
+      currentRow: 6.5,
+      elapsed: 0.1,
+      roundStartTime: 1000,
+    },
+    prisma: makeFakePrisma({ user: { id: 'u2', balance: 1, playBalance: 2 } }),
+    verifyToken: async (token) => (token === 'u2' ? 'u2' : null),
+    verifyTokenFromCookie: async () => 'u1',
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 0 },
+  });
+
+  t.after(async () => {
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000', cookie: 'next-auth.session-token=good' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const authP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  const snapshotP = waitForEvent<any>(socket, WS_EVENTS.STATE_SNAPSHOT);
+  socket.connect();
+  await authP;
+  await snapshotP;
+
+  const switchAuthP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.emit(WS_EVENTS.AUTH, { token: 'u2' });
+  const switchAuth = await switchAuthP;
+  assert.equal(switchAuth.payload.success, true);
+  assert.equal(switchAuth.payload.userId, 'u2');
+
+  const connectedUsers: Map<string, Set<string>> = (gateway as any).connectedUsers;
+  assert.equal(connectedUsers.has('u1'), false);
+  assert.equal(connectedUsers.has('u2'), true);
+});
+
 test('getGameEngine/getPriceService: throws before start when deps missing', async (t) => {
   const httpServer = createServer();
   const gateway = new WebSocketGateway(httpServer, {} as any, makeFakePrisma({}) as any, {
@@ -977,6 +1266,115 @@ test('anon routing: bet events sent to socket.id room when userId starts with an
   await refundedP;
 });
 
+test('anonymous play mode: allows placing bets with isPlayMode=true', async (t) => {
+  const { httpServer, url, gateway, fakeGameEngine } = await setupGateway({
+    allowedOrigin: 'http://localhost:3000',
+    gameState: {
+      roundId: 'r1',
+      status: 'BETTING',
+      asset: 'BTCUSDT',
+      startPrice: 100,
+      currentPrice: 100,
+      currentRow: 6.5,
+      elapsed: 0.5,
+      roundStartTime: 1000,
+    },
+    prisma: makeFakePrisma({}),
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 0 },
+  });
+
+  t.after(async () => {
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const authP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.connect();
+  const auth = await authP;
+  assert.equal(auth.payload.isAnonymous, true);
+  assert.ok(socket.id);
+
+  // 匿名用户发送试玩模式下注
+  const confirmedP = waitForEvent<any>(socket, WS_EVENTS.BET_CONFIRMED);
+  socket.emit(WS_EVENTS.PLACE_BET, {
+    orderId: 'play-order-1',
+    amount: 10,
+    targetRow: 6.5,
+    targetTime: 2.5,
+    isPlayMode: true,  // 试玩模式
+  });
+
+  const confirmed = await confirmedP;
+  assert.equal(confirmed.payload.orderId, 'play-order-1');
+  assert.equal(confirmed.payload.amount, 10);
+
+  // 验证 GameEngine.placeBet 被调用，userId 为 anon-{socketId}
+  assert.equal(fakeGameEngine.placeBetCalls.length, 1);
+  assert.equal(fakeGameEngine.placeBetCalls[0].userId, `anon-${socket.id}`);
+  assert.equal(fakeGameEngine.placeBetCalls[0].request.isPlayMode, true);
+});
+
+test('anonymous real money: rejects placing bets with isPlayMode=false', async (t) => {
+  const { httpServer, url, gateway, fakeGameEngine } = await setupGateway({
+    allowedOrigin: 'http://localhost:3000',
+    gameState: {
+      roundId: 'r1',
+      status: 'BETTING',
+      asset: 'BTCUSDT',
+      startPrice: 100,
+      currentPrice: 100,
+      currentRow: 6.5,
+      elapsed: 0.5,
+      roundStartTime: 1000,
+    },
+    prisma: makeFakePrisma({}),
+    stateSync: { replayCurrentRoundBets: false, historyLimit: 0 },
+  });
+
+  t.after(async () => {
+    await gateway.stop();
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  });
+
+  const socket = clientIo(url, {
+    autoConnect: false,
+    transports: ['websocket'],
+    extraHeaders: { origin: 'http://localhost:3000' },
+    reconnection: false,
+  });
+  t.after(() => socket.disconnect());
+
+  const authP = waitForEvent<any>(socket, WS_EVENTS.AUTH_RESULT);
+  socket.connect();
+  await authP;
+
+  // 匿名用户发送真金模式下注（应被拒绝）
+  const rejectedP = waitForEvent<any>(socket, WS_EVENTS.BET_REJECTED);
+  socket.emit(WS_EVENTS.PLACE_BET, {
+    orderId: 'real-order-1',
+    amount: 10,
+    targetRow: 6.5,
+    targetTime: 2.5,
+    isPlayMode: false,  // 真金模式
+  });
+
+  const rejected = await rejectedP;
+  assert.equal(rejected.payload.orderId, 'real-order-1');
+  assert.equal(rejected.payload.code, 'UNAUTHORIZED');
+  assert.ok(rejected.payload.message.includes('登录'));
+
+  // 验证 GameEngine.placeBet 未被调用
+  assert.equal(fakeGameEngine.placeBetCalls.length, 0);
+});
+
 test('toNumber: handles Decimal-like objects and exceptions', async (t) => {
   const prisma = makeFakePrisma({
     user: {
@@ -1023,4 +1421,313 @@ test('toNumber: handles Decimal-like objects and exceptions', async (t) => {
   const snapshot = await snapshotP;
   assert.equal(snapshot.payload.user.balance, 0);
   assert.equal(snapshot.payload.user.playBalance, 7);
+});
+
+test('gameMath: clampRowIndex clamps values into range', () => {
+  assert.equal(clampRowIndex(MIN_ROW_INDEX - 1), MIN_ROW_INDEX);
+  assert.equal(clampRowIndex(MAX_ROW_INDEX + 1), MAX_ROW_INDEX);
+  assert.equal(clampRowIndex(6.5), 6.5);
+});
+
+test('gameMath: roundMoney + isValidMoneyAmount handle cents precision', () => {
+  assert.equal(roundMoney(0.1 + 0.2), 0.3);
+  assert.equal(isValidMoneyAmount(1.23), true);
+  assert.equal(isValidMoneyAmount(1.234), false);
+});
+
+test('gameMath: isHitByTickSeries detects hits and misses', () => {
+  const ticks = [
+    { elapsed: 0, row: 6.5 },
+    { elapsed: 1, row: 7 },
+    { elapsed: 2, row: 7.5 },
+  ];
+
+  assert.equal(isHitByTickSeries({ ticks, targetTime: 1, targetRow: 6.8 }), true);
+  assert.equal(isHitByTickSeries({ ticks, targetTime: 1, targetRow: 10 }), false);
+  assert.equal(isHitByTickSeries({ ticks: [], targetTime: 1, targetRow: 6.8 }), false);
+});
+
+test('gameMath: calculateAdjustedProbability + calculateMultiplier stay bounded', () => {
+  const pCenterNow = calculateAdjustedProbability(CENTER_ROW_INDEX, CENTER_ROW_INDEX, 0);
+  const pFarLater = calculateAdjustedProbability(CENTER_ROW_INDEX + 4, CENTER_ROW_INDEX, 1);
+  assert.ok(pCenterNow >= 0 && pCenterNow <= 1);
+  assert.ok(pFarLater >= 0 && pFarLater <= 1);
+  assert.ok(pFarLater < pCenterNow);
+
+  const mCenter = calculateMultiplier(CENTER_ROW_INDEX, CENTER_ROW_INDEX, 1);
+  const mFar = calculateMultiplier(CENTER_ROW_INDEX + 4, CENTER_ROW_INDEX, 1);
+  assert.ok(mCenter >= MIN_MULTIPLIER && mCenter <= MAX_MULTIPLIER);
+  assert.ok(mFar >= MIN_MULTIPLIER && mFar <= MAX_MULTIPLIER);
+  assert.ok(mFar > mCenter);
+
+  assert.equal(
+    calculateAdjustedProbability(CENTER_ROW_INDEX, CENTER_ROW_INDEX, 1, { model: { sigma: 0 } }),
+    0
+  );
+  assert.equal(
+    calculateAdjustedProbability(CENTER_ROW_INDEX + 100, CENTER_ROW_INDEX, 1, { model: { sigma: 0.1 } }),
+    0
+  );
+});
+
+class FakeRedisPipeline {
+  constructor(private calls: Array<{ op: string; args: any[] }>) {}
+
+  lpush(...args: any[]) {
+    this.calls.push({ op: 'lpush', args });
+    return this;
+  }
+
+  ltrim(...args: any[]) {
+    this.calls.push({ op: 'ltrim', args });
+    return this;
+  }
+
+  async exec() {
+    return [];
+  }
+}
+
+class FakeRedis {
+  public calls: Array<{ op: string; args: any[] }> = [];
+
+  pipeline() {
+    return new FakeRedisPipeline(this.calls);
+  }
+}
+
+class FakeWebSocket extends EventEmitter {
+  public readyState = 0;
+  public sent: any[] = [];
+
+  constructor(
+    public url: string,
+    public options: any
+  ) {
+    super();
+  }
+
+  send(data: any) {
+    this.sent.push(data);
+  }
+
+  close() {
+    this.readyState = 3;
+    this.emit('close', 1000, Buffer.from(''));
+  }
+}
+
+function makeTradeMessage(args: { topic: string; price: number; ts: number }) {
+  return JSON.stringify({
+    topic: args.topic,
+    data: [{ p: String(args.price), T: String(args.ts) }],
+  });
+}
+
+test('PriceService: starts, subscribes, and sends periodic ping using injected WS', async (t) => {
+  const redis = new FakeRedis();
+  const sockets: FakeWebSocket[] = [];
+
+  const service = new PriceService(
+    {
+      asset: 'BTC',
+      wsFactory: (url, options) => {
+        const ws = new FakeWebSocket(url, options);
+        sockets.push(ws);
+        return ws as any;
+      },
+      connectTimeoutMs: 50,
+      pingIntervalMs: 10,
+      priceSampleMs: 10,
+    },
+    redis as any
+  );
+
+  t.after(async () => {
+    await service.stop();
+  });
+
+  const connectedP = withTimeout(
+    new Promise<void>((resolve) => service.once('connected', () => resolve())),
+    2000,
+    'PriceService connected'
+  );
+
+  const startP = withTimeout(service.start(), 2000, 'PriceService start');
+  assert.equal(sockets.length, 1);
+
+  const ws = sockets[0];
+  assert.ok(ws instanceof FakeWebSocket);
+  ws.readyState = 1;
+  ws.emit('open');
+
+  await startP;
+  await connectedP;
+
+  const subscribe = JSON.parse(ws.sent[0]);
+  assert.equal(subscribe.op, 'subscribe');
+  assert.equal(subscribe.args[0], 'publicTrade.BTCUSDT');
+
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok(ws.sent.some((msg) => JSON.parse(msg).op === 'ping'));
+
+  ws.emit('error', new Error('boom'));
+});
+
+test('PriceService: throttles high-frequency trades to sampling interval', async (t) => {
+  const redis = new FakeRedis();
+  const sockets: FakeWebSocket[] = [];
+  const service = new PriceService(
+    {
+      asset: 'BTC',
+      wsFactory: (url, options) => {
+        const ws = new FakeWebSocket(url, options);
+        sockets.push(ws);
+        return ws as any;
+      },
+      connectTimeoutMs: 50,
+      priceSampleMs: 25,
+    },
+    redis as any
+  );
+
+  t.after(async () => {
+    await service.stop();
+  });
+
+  const startP = withTimeout(service.start(), 2000, 'PriceService start (throttle)');
+  assert.equal(sockets.length, 1);
+  const ws = sockets[0];
+  ws.readyState = 1;
+  ws.emit('open');
+  await startP;
+
+  const emitted: Array<{ price: number; at: number }> = [];
+  service.on('price', (payload: any) => {
+    emitted.push({ price: payload.price, at: Date.now() });
+  });
+
+  let price = 100;
+  const send = () => {
+    price += 1;
+    ws.emit('message', makeTradeMessage({ topic: 'publicTrade.BTCUSDT', price, ts: price }));
+  };
+
+  send();
+  const tradeTimer = setInterval(send, 5);
+  await new Promise((r) => setTimeout(r, 120));
+  clearInterval(tradeTimer);
+
+  // allow trailing emit
+  await new Promise((r) => setTimeout(r, 60));
+
+  assert.ok(emitted.length >= 3, `expected >= 3 emits, got ${emitted.length}`);
+  for (let i = 1; i < emitted.length; i++) {
+    const delta = emitted[i].at - emitted[i - 1].at;
+    assert.ok(delta >= 15, `emit interval too small: ${delta}ms`);
+    assert.ok(emitted[i].price >= emitted[i - 1].price);
+  }
+  assert.equal(emitted[emitted.length - 1].price, price);
+});
+
+test('PriceService: degraded start on connect close before open (no throw)', async (t) => {
+  const redis = new FakeRedis();
+  const sockets: FakeWebSocket[] = [];
+
+  const service = new PriceService(
+    {
+      asset: 'BTC',
+      allowStartWithoutConnection: true,
+      wsFactory: (url, options) => {
+        const ws = new FakeWebSocket(url, options);
+        sockets.push(ws);
+        return ws as any;
+      },
+      connectTimeoutMs: 50,
+    },
+    redis as any
+  );
+
+  t.after(async () => {
+    await service.stop();
+  });
+
+  const startP = withTimeout(service.start(), 2000, 'PriceService degraded start (close)');
+  assert.equal(sockets.length, 1);
+  sockets[0].emit('close', 1006, Buffer.from('closed'));
+  await startP;
+});
+
+test('PriceService: degraded start on connect timeout schedules reconnect', async (t) => {
+  const redis = new FakeRedis();
+  const sockets: FakeWebSocket[] = [];
+
+  const service = new PriceService(
+    {
+      asset: 'BTC',
+      allowStartWithoutConnection: true,
+      wsFactory: (url, options) => {
+        const ws = new FakeWebSocket(url, options);
+        sockets.push(ws);
+        return ws as any;
+      },
+      connectTimeoutMs: 10,
+    },
+    redis as any
+  );
+
+  t.after(async () => {
+    await service.stop();
+  });
+
+  await withTimeout(service.start(), 2000, 'PriceService degraded start (timeout)');
+  assert.equal(sockets.length, 1);
+  await waitUntil(() => Boolean((service as any).reconnectTimer));
+});
+
+test('PriceService: health check emits critical when price is stale', async (t) => {
+  const redis = new FakeRedis();
+  const service = new PriceService({ asset: 'BTC' }, redis as any);
+
+  t.after(async () => {
+    await service.stop();
+  });
+
+  (service as any).lastPrice = { asset: 'BTC', price: 1, timestamp: 1, source: 'bybit' };
+  (service as any).lastPriceTime = Date.now() - 15_000;
+
+  const criticalP = withTimeout(
+    new Promise((resolve) => service.once('price_critical', resolve)),
+    3000,
+    'PriceService price_critical'
+  );
+  (service as any).startHealthCheck();
+  await criticalP;
+
+  assert.equal(service.getLatestPrice(), null);
+  assert.ok(service.getPriceStaleness() > 10_000);
+});
+
+test('PriceService: normalizeMessageData handles common ws payload types', async () => {
+  const redis = new FakeRedis();
+  const service = new PriceService({ asset: 'BTC' }, redis as any);
+
+  const normalize = (service as any).normalizeMessageData.bind(service) as (data: any) => string;
+  assert.equal(normalize('x'), 'x');
+  assert.equal(normalize(Buffer.from('y')), 'y');
+  assert.equal(normalize([Buffer.from('a'), Buffer.from('b')]), 'ab');
+  assert.equal(normalize(new Uint8Array([99]).buffer), 'c');
+});
+
+test('PriceService: scheduleReconnect emits critical_failure when max attempts reached', async () => {
+  const redis = new FakeRedis();
+  const service = new PriceService({ asset: 'BTC', maxReconnectAttempts: 0 }, redis as any);
+
+  const criticalP = withTimeout(
+    new Promise((resolve) => service.once('critical_failure', resolve)),
+    2000,
+    'PriceService critical_failure'
+  );
+  (service as any).scheduleReconnect();
+  await criticalP;
 });

@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
+import { validateSameOrigin } from "@/lib/utils/csrf";
 let cachedFinancialService: { setPlayBalance: (userId: string, newBalance: number) => Promise<number> } | null = null;
 
 async function getFinancialService() {
@@ -54,7 +55,7 @@ export async function validateUserStatus(userId: string, prismaClient = prisma) 
 }
 
 // 获取用户余额
-export async function GET(deps: BalanceDeps = {}) {
+export async function GET(_request: NextRequest, deps: BalanceDeps = {}) {
   try {
     const auth = deps.auth ?? (await import("@/lib/auth")).auth;
     const getOrCreateUser = deps.getOrCreateUser ?? (await import("@/lib/services/user")).getOrCreateUser;
@@ -102,6 +103,13 @@ export async function GET(deps: BalanceDeps = {}) {
 // 更新用户余额
 export async function POST(request: NextRequest, deps: BalanceDeps = {}) {
   try {
+    if (!validateSameOrigin(request)) {
+      return NextResponse.json(
+        { error: "Forbidden: Cross-origin request" },
+        { status: 403 }
+      );
+    }
+
     const auth = deps.auth ?? (await import("@/lib/auth")).auth;
     const session = await auth();
 

@@ -61,7 +61,9 @@
       "Bash(then echo \"$task: COMPLETED\")",
       "Bash(else echo \"$task: Still running\")",
       "Bash(fi)",
-      "Bash(pnpm test)"
+      "Bash(pnpm test)",
+      "Bash(npx tsx --test:*)",
+      "Bash(pnpm test:*)"
     ]
   }
 }

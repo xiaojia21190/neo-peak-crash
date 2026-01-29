@@ -20,6 +20,7 @@ import { Pool } from 'pg';
 import { WebSocketGateway } from '../lib/game-engine/WebSocketGateway';
 import { getRedisClient, closeRedisClient } from '../lib/redis';
 import { FinancialService } from '../lib/services/financial';
+import { HousePoolService } from '../lib/services/HousePoolService';
 
 // 配置
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -54,6 +55,7 @@ async function main() {
   });
   prisma = prismaInstance;
   const financialService = new FinancialService(prismaInstance);
+  const housePoolService = new HousePoolService(prismaInstance);
   await prismaInstance.$connect();
   console.log('[Init] ✓ Database connected');
 
@@ -91,7 +93,7 @@ async function main() {
     // 统计端点
     if (req.url === '/stats') {
       const adminToken = process.env.ADMIN_TOKEN;
-      const authHeaderValue = (req.headers as any).authorization as string | string[] | undefined;
+      const authHeaderValue = req.headers['authorization'];
       const authHeader = Array.isArray(authHeaderValue) ? authHeaderValue[0] : authHeaderValue;
 
       if (!adminToken) {
@@ -195,7 +197,7 @@ async function main() {
   const orphanedRounds = await prisma.round.findMany({
     where: {
       status: {
-        in: ['BETTING', 'RUNNING'],
+        in: ['BETTING', 'RUNNING', 'SETTLING'],
       },
     },
     select: { id: true, status: true, startedAt: true },
@@ -218,19 +220,21 @@ async function main() {
         const pendingBets = await prisma.bet.findMany({
           where: {
             roundId: round.id,
-            status: 'PENDING',
+            status: { in: ['PENDING', 'SETTLING'] },
           },
           select: {
             id: true,
+            orderId: true,
             userId: true,
             amount: true,
             isPlayMode: true,
+            asset: true,
           },
         });
 
         // 3. 退款
         if (pendingBets.length > 0) {
-          console.log(`[Init] Refunding ${pendingBets.length} pending bets for round ${round.id}`);
+          console.log(`[Init][Recovery] Refunding ${pendingBets.length} unsettled bets for round ${round.id}`);
 
           for (const bet of pendingBets) {
             await prisma.$transaction(async (tx) => {
@@ -238,7 +242,7 @@ async function main() {
               const updated = await tx.bet.updateMany({
                 where: {
                   id: bet.id,
-                  status: 'PENDING',
+                  status: { in: ['PENDING', 'SETTLING'] },
                 },
                 data: {
                   status: 'REFUNDED',
@@ -259,6 +263,17 @@ async function main() {
                   },
                   tx
                 );
+
+                if (!bet.isPlayMode) {
+                  try {
+                    await housePoolService.applyDelta(
+                      { asset: bet.asset, amount: -Number(bet.amount) },
+                      tx
+                    );
+                  } catch (error) {
+                    console.error(`[Init][Recovery] Failed to update house pool for refund bet ${bet.id}:`, error);
+                  }
+                }
               } else {
                 console.log(`[Init] Bet ${bet.id} already refunded, skipping`);
               }

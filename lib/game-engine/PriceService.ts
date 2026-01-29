@@ -13,6 +13,27 @@ export interface PriceServiceConfig {
   asset: string;
   maxReconnectAttempts?: number;
   allowStartWithoutConnection?: boolean;
+  /**
+   * Throttle frequency for emitting `price` events (ms).
+   * Defaults to `PRICE_SAMPLE_MS` env or 50ms.
+   */
+  priceSampleMs?: number;
+  /**
+   * Override WS url (mainly for tests).
+   */
+  wsUrl?: string;
+  /**
+   * Optional WebSocket factory (mainly for tests).
+   */
+  wsFactory?: (url: string, options: any) => WebSocket;
+  /**
+   * Connect timeout (ms). Defaults to 10_000.
+   */
+  connectTimeoutMs?: number;
+  /**
+   * Bybit ping interval (ms). Defaults to 20_000.
+   */
+  pingIntervalMs?: number;
 }
 
 export class PriceService extends EventEmitter {
@@ -22,11 +43,20 @@ export class PriceService extends EventEmitter {
   private lastPrice: PriceUpdate | null = null;
   private lastPriceTime = 0;
   private lastRedisWrite = 0;
+  private lastPriceEmitTime = 0;
+  private pendingPriceEmit = false;
+  private priceEmitTimer: ReturnType<typeof setTimeout> | null = null;
   private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isStopped = false;
   private reconnectScheduled = false;
+  private readonly priceSampleMs: number;
+  private readonly redisSampleMs: number;
+  private readonly wsUrl: string;
+  private readonly wsFactory: (url: string, options: any) => WebSocket;
+  private readonly connectTimeoutMs: number;
+  private readonly pingIntervalMs: number;
 
   constructor(
     private config: PriceServiceConfig,
@@ -34,6 +64,17 @@ export class PriceService extends EventEmitter {
   ) {
     super();
     this.maxReconnectAttempts = config.maxReconnectAttempts ?? 10;
+
+    const envSampleMs = parseInt(process.env.PRICE_SAMPLE_MS ?? '50', 10);
+    const rawSampleMs = config.priceSampleMs ?? envSampleMs;
+    this.priceSampleMs = Number.isFinite(rawSampleMs) ? Math.max(5, rawSampleMs) : 50;
+
+    this.redisSampleMs = parseInt(process.env.REDIS_SAMPLE_MS ?? '50', 10);
+
+    this.wsUrl = config.wsUrl ?? 'wss://stream.bybit.com/v5/public/linear';
+    this.wsFactory = config.wsFactory ?? ((url, options) => new WebSocket(url, options));
+    this.connectTimeoutMs = Math.max(10, config.connectTimeoutMs ?? 10_000);
+    this.pingIntervalMs = Math.max(10, config.pingIntervalMs ?? 20_000);
   }
 
   async start(): Promise<void> {
@@ -61,7 +102,7 @@ export class PriceService extends EventEmitter {
   private async connect(): Promise<void> {
     if (this.isStopped) return;
 
-    const url = 'wss://stream.bybit.com/v5/public/linear';
+    const url = this.wsUrl;
 
     console.log(`[PriceService] Connecting to Bybit for ${this.config.asset}...`);
 
@@ -77,7 +118,7 @@ export class PriceService extends EventEmitter {
           options.agent = new HttpsProxyAgent(proxyUrl);
         }
 
-        this.ws = new WebSocket(url, options);
+        this.ws = this.wsFactory(url, options);
 
         const connectTimeout = setTimeout(() => {
           if (!settled && this.ws?.readyState !== WebSocket.OPEN) {
@@ -86,7 +127,7 @@ export class PriceService extends EventEmitter {
             this.ws?.close();
             reject(new Error('Connection timeout'));
           }
-        }, 10000);
+        }, this.connectTimeoutMs);
 
         this.ws.on('open', () => {
           if (!settled) {
@@ -106,7 +147,7 @@ export class PriceService extends EventEmitter {
               if (this.ws?.readyState === WebSocket.OPEN) {
                 this.ws.send(JSON.stringify({ op: 'ping' }));
               }
-            }, 20000);
+            }, this.pingIntervalMs);
 
             this.emit('connected');
             resolve();
@@ -170,18 +211,18 @@ export class PriceService extends EventEmitter {
           source: 'bybit',
         };
 
+        const now = Date.now();
+
         if (this.lastPriceTime === 0) {
           this.emit('ready');
         }
-        this.lastPriceTime = Date.now();
+        this.lastPriceTime = now;
 
         // 发送价格更新事件
-        this.emit('price', this.lastPrice);
+        this.requestPriceEmit(now);
 
         // 采样写入 Redis（默认 50ms 间隔）
-        const redisSampleMs = parseInt(process.env.REDIS_SAMPLE_MS ?? '50', 10);
-        const now = Date.now();
-        if (now - this.lastRedisWrite >= redisSampleMs) {
+        if (now - this.lastRedisWrite >= this.redisSampleMs) {
           this.lastRedisWrite = now;
           this.cachePrice(this.lastPrice).catch(err =>
             console.error('[PriceService] Redis cache failed:', err)
@@ -191,6 +232,37 @@ export class PriceService extends EventEmitter {
     } catch (err) {
       console.error('[PriceService] Parse error:', err);
     }
+  }
+
+  private requestPriceEmit(now: number): void {
+    this.pendingPriceEmit = true;
+
+    const elapsed = now - this.lastPriceEmitTime;
+    if (this.lastPriceEmitTime === 0 || elapsed >= this.priceSampleMs) {
+      if (this.priceEmitTimer) {
+        clearTimeout(this.priceEmitTimer);
+        this.priceEmitTimer = null;
+      }
+      this.flushPriceEmit(now);
+      return;
+    }
+
+    if (this.priceEmitTimer) return;
+
+    const delay = Math.max(0, this.priceSampleMs - elapsed);
+    this.priceEmitTimer = setTimeout(() => {
+      this.priceEmitTimer = null;
+      if (this.isStopped) return;
+      if (!this.pendingPriceEmit) return;
+      this.flushPriceEmit(Date.now());
+    }, delay);
+  }
+
+  private flushPriceEmit(now: number): void {
+    if (!this.lastPrice) return;
+    this.pendingPriceEmit = false;
+    this.lastPriceEmitTime = now;
+    this.emit('price', this.lastPrice);
   }
 
   private async cachePrice(price: PriceUpdate): Promise<void> {
@@ -304,6 +376,10 @@ export class PriceService extends EventEmitter {
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
+    }
+    if (this.priceEmitTimer) {
+      clearTimeout(this.priceEmitTimer);
+      this.priceEmitTimer = null;
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

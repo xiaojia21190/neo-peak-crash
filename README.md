@@ -39,11 +39,23 @@ pnpm install
 cp .env.example .env.local
 ```
 
-必填配置：
+核心配置（必填）：
 
 ```env
 # NextAuth 密钥 (生成: openssl rand -base64 32)
 AUTH_SECRET="your-auth-secret"
+
+# 网站 URL (OAuth 回调 & 支付回调)
+NEXTAUTH_URL="http://localhost:3000"
+
+# 数据库 (PostgreSQL / Prisma)
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/DATABASE"
+
+# Redis (可选，默认 redis://localhost:6379)
+# REDIS_URL="redis://localhost:6379"
+
+# WebSocket 服务地址 (可选，默认 http://localhost:3001)
+# NEXT_PUBLIC_WS_URL="http://localhost:3001"
 
 # Linux DO OAuth2 (https://connect.linux.do)
 LINUXDO_CLIENT_ID="your_client_id"
@@ -103,11 +115,25 @@ pnpm dev
 | ----------------------- | ---- | --------------------------------- |
 | `AUTH_SECRET`           | ✅    | NextAuth 加密密钥                 |
 | `NEXTAUTH_URL`          | ✅    | 网站 URL                          |
+| `DATABASE_URL`          | ✅    | PostgreSQL 连接字符串（Prisma）   |
 | `LINUXDO_CLIENT_ID`     | ✅    | Linux DO OAuth Client ID          |
 | `LINUXDO_CLIENT_SECRET` | ✅    | Linux DO OAuth Client Secret      |
 | `LDC_CLIENT_ID`         | ✅    | Linux DO Credit Client ID         |
 | `LDC_CLIENT_SECRET`     | ✅    | Linux DO Credit Client Secret     |
 | `LDC_GATEWAY`           | ❌    | 支付网关地址（默认官方地址）      |
+| `REDIS_URL`             | ❌    | Redis 连接字符串（默认本地 6379） |
+| `NEXT_PUBLIC_WS_URL`    | ❌    | WebSocket 服务地址（前端使用）    |
+| `ADMIN_TOKEN`           | ❌    | 游戏服 `/stats` Bearer Token      |
+
+更多可选配置见 `.env.example`。
+
+## 🔐 密钥管理最佳实践
+
+- `.env.local` 仅用于本地开发，禁止提交到 Git（已在 `.gitignore` 中忽略 `.env.local` / `.env*.local`）
+- `.env.example` 只保留变量名 + 占位符，不要写入任何真实密钥/凭据
+- 生产环境使用平台的环境变量/Secrets 管理（Vercel/容器/CI），不同环境使用不同密钥
+- 一旦泄露：立即吊销/轮换密钥，并检查日志、CI 输出和历史提交
+- 避免在日志/报错中输出敏感值（如需排查，使用脱敏/掩码）
 
 ## 🛠️ 技术栈
 
