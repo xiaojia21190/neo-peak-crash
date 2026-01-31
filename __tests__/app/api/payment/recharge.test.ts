@@ -484,8 +484,8 @@ describe('Recharge Route', () => {
   }
 
   test('rejects cross-origin requests', async () => {
-    const { POST } = await routeModule;
-    const response = await POST(buildRequest({ amount: 10 }), {
+    const { handleRecharge } = await routeModule;
+    const response = await handleRecharge(buildRequest({ amount: 10 }), {
       validateSameOrigin: () => false,
     } as any);
 
@@ -497,8 +497,8 @@ describe('Recharge Route', () => {
   test('rejects unauthenticated user', async () => {
     prismaMock.seedUser({ id: 'user-auth', username: 'user-auth', active: true });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildRequest({ amount: 10 }), {
+    const { handleRecharge } = await routeModule;
+    const response = await handleRecharge(buildRequest({ amount: 10 }), {
       validateSameOrigin: () => true,
       auth: async () => null,
       getRedisClient: () => ({} as any),
@@ -514,8 +514,8 @@ describe('Recharge Route', () => {
   test('rejects invalid amount', async () => {
     prismaMock.seedUser({ id: 'user-amt', username: 'user-amt', active: true });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildRequest({ amount: 0 }), {
+    const { handleRecharge } = await routeModule;
+    const response = await handleRecharge(buildRequest({ amount: 0 }), {
       validateSameOrigin: () => true,
       auth: async () => ({ user: { id: 'user-amt' } }),
       getRedisClient: () => ({} as any),
@@ -531,8 +531,8 @@ describe('Recharge Route', () => {
   test('rejects rate-limited request', async () => {
     prismaMock.seedUser({ id: 'user-rl', username: 'user-rl', active: true });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildRequest({ amount: 10 }), {
+    const { handleRecharge } = await routeModule;
+    const response = await handleRecharge(buildRequest({ amount: 10 }), {
       validateSameOrigin: () => true,
       auth: async () => ({ user: { id: 'user-rl' } }),
       getRedisClient: () => ({} as any),
@@ -556,8 +556,8 @@ describe('Recharge Route', () => {
       createdAt: new Date(),
     });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildRequest({ amount: 1 }), {
+    const { handleRecharge } = await routeModule;
+    const response = await handleRecharge(buildRequest({ amount: 1 }), {
       validateSameOrigin: () => true,
       auth: async () => ({ user: { id: 'user-limit' } }),
       getRedisClient: () => ({} as any),
@@ -573,8 +573,8 @@ describe('Recharge Route', () => {
   test('creates pending transaction and returns payment form', async () => {
     prismaMock.seedUser({ id: 'user-ok', username: 'user-ok', active: true });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildRequest({ amount: 10 }), {
+    const { handleRecharge } = await routeModule;
+    const response = await handleRecharge(buildRequest({ amount: 10 }), {
       validateSameOrigin: () => true,
       auth: async () => ({ user: { id: 'user-ok' } }),
       getRedisClient: () => ({} as any),

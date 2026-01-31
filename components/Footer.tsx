@@ -35,8 +35,8 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
   const isWaiting = gameStatus === GameStatus.WAITING;
 
   return (
-    <footer className="h-28 bg-[#0F172A] border-t border-slate-700/30 flex items-center px-14 justify-between z-50 shadow-2xl backdrop-blur-sm">
-      <div className="flex gap-16">
+    <footer className="h-auto py-4 md:py-0 md:h-28 bg-[#0F172A] border-t border-slate-700/30 flex flex-col-reverse md:flex-row items-center px-4 md:px-14 justify-between z-50 shadow-2xl backdrop-blur-sm gap-4 md:gap-0 sticky bottom-0 md:relative">
+      <div className="flex flex-wrap justify-center gap-6 md:gap-16 w-full md:w-auto">
         {/* Stake Amount */}
         <div className="flex flex-col gap-2.5">
           <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Stake Amount</span>
@@ -56,7 +56,7 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
             </button>
           </div>
           {/* Quick Bet Buttons */}
-          <div className="flex gap-1">
+          <div className="flex gap-1 overflow-x-auto pb-1 md:pb-0 max-w-50 md:max-w-none no-scrollbar">
             {QUICK_AMOUNTS.map((amount) => (
               <button key={amount} onClick={() => onStakeChange(amount)} className={`px-2 py-1 text-[8px] font-bold rounded-lg transition-all ${stakeAmount === amount ? "bg-indigo-600 text-white" : "bg-white/5 text-gray-400 hover:bg-white/10 hover:text-white"}`}>
                 {amount}
@@ -87,7 +87,7 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
 
         {/* Game Mode */}
         <div className="flex flex-col gap-2.5">
-          <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60">Game Mode</span>
+          <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60 hidden md:inline">Game Mode</span>
           <div className="flex items-center gap-2">
             <button
               onClick={onToggleMode}
@@ -111,9 +111,9 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
         </div>
       </div>
 
-      <div className="flex items-center gap-20">
-        {/* Active Risk */}
-        <div className="flex flex-col items-end gap-1.5">
+      <div className="flex items-center gap-4 md:gap-20 w-full md:w-auto justify-between md:justify-end">
+        {/* Active Risk - Hidden on small screens */}
+        <div className="hidden md:flex flex-col items-end gap-1.5">
           <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest opacity-60">Active Risk</span>
           <span className="text-3xl font-black text-yellow-400 mono tracking-tighter shadow-yellow-400/10 drop-shadow-lg">${(activeBetsCount * stakeAmount).toFixed(2)}</span>
         </div>
@@ -122,7 +122,7 @@ export const Footer = memo(function Footer({ stakeAmount, onStakeChange, current
         <button
           onClick={isRunning ? onStopRound : onStartRound}
           disabled={isCrashed}
-          className={`px-16 h-14 rounded-2xl font-black text-xs uppercase italic tracking-[0.25em] transition-all shadow-2xl relative overflow-hidden group ${
+          className={`flex-1 md:flex-none px-8 md:px-16 h-12 md:h-14 rounded-2xl font-black text-xs uppercase italic tracking-[0.25em] transition-all shadow-2xl relative overflow-hidden group ${
             !isConnected
               ? "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/40 active:scale-95"
               : isRunning

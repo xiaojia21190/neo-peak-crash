@@ -55,8 +55,8 @@ const getAssetName = (symbol: string) => {
 
 export const Header = memo(function Header({ selectedAsset, onAssetChange, isGameRunning, isMusicPlaying, onToggleMusic, onOpenTutorial, realPrice, connectionError, sessionPL, streak, ldcBalance, playBalance, isPlayMode, onOpenRecharge }: HeaderProps) {
   return (
-    <header className="flex justify-between items-center px-8 py-4 bg-background-dark border-b border-border-dark z-50 shadow-glass">
-      <div className="flex items-center gap-10">
+    <header className="flex justify-between items-center px-4 py-3 md:px-8 md:py-4 bg-background-dark border-b border-border-dark z-50 shadow-glass sticky top-0 md:relative">
+      <div className="flex items-center gap-2 md:gap-10">
         {/* Logo */}
         <div className="flex items-center gap-2 group cursor-pointer">
           <div className="w-9 h-9 bg-cta rounded-xl flex items-center justify-center shadow-neon-purple group-hover:bg-cta-light transition-colors duration-200">
@@ -65,8 +65,8 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
           <span className="font-heading font-black text-xs tracking-[0.2em] uppercase italic opacity-80">PingooTread</span>
         </div>
 
-        {/* Asset Selector */}
-        <nav className="flex gap-2 p-1.5 glass rounded-2xl">
+        {/* Asset Selector - Desktop Only for now */}
+        <nav className="hidden md:flex gap-2 p-1.5 glass rounded-2xl">
           {ASSETS.map((asset) => (
             <button
               key={asset}
@@ -79,8 +79,8 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
           ))}
         </nav>
 
-        {/* Music Toggle */}
-        <button onClick={onToggleMusic} className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-colors duration-200 cursor-pointer ${isMusicPlaying ? "bg-cta/10 border-cta/30 text-cta" : "glass text-text-muted hover:text-text hover:bg-white/10"}`}>
+        {/* Music Toggle - Desktop */}
+        <button onClick={onToggleMusic} className={`hidden md:flex items-center gap-2 px-4 py-2 rounded-xl border transition-colors duration-200 cursor-pointer ${isMusicPlaying ? "bg-cta/10 border-cta/30 text-cta" : "glass text-text-muted hover:text-text hover:bg-white/10"}`}>
           {isMusicPlaying ? (
             <>
               <div className="flex gap-0.5 items-end h-3">
@@ -101,8 +101,8 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
           )}
         </button>
 
-        {/* Help Button */}
-        <button onClick={onOpenTutorial} className="flex items-center gap-2 px-4 py-2 rounded-xl border glass text-text-muted hover:text-text hover:bg-white/10 transition-colors duration-200 cursor-pointer">
+        {/* Help Button - Desktop */}
+        <button onClick={onOpenTutorial} className="hidden md:flex items-center gap-2 px-4 py-2 rounded-xl border glass text-text-muted hover:text-text hover:bg-white/10 transition-colors duration-200 cursor-pointer">
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -110,9 +110,9 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
         </button>
       </div>
 
-      <div className="flex items-center gap-10">
+      <div className="flex items-center gap-3 md:gap-10">
         {/* Price Display */}
-        <div className="flex flex-col items-end">
+        <div className="hidden md:flex flex-col items-end">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[8px] text-text-dark font-bold uppercase tracking-widest">{getAssetName(selectedAsset)} / USD</span>
             <button disabled={true} className={`text-[8px] px-1.5 py-0.5 rounded uppercase tracking-wider font-heading font-black transition-colors ${connectionError ? "bg-red-500/20 text-red-400 border border-red-500/30" : "glass text-text-muted opacity-60 cursor-default"}`}>
@@ -129,11 +129,11 @@ export const Header = memo(function Header({ selectedAsset, onAssetChange, isGam
           </div>
         </div>
 
-        <div className="h-8 w-px bg-border-dark"></div>
+        <div className="hidden md:block h-8 w-px bg-border-dark"></div>
 
-        {/* Session P/L */}
+        {/* Session P/L - Compact on mobile */}
         <div className="flex flex-col items-end">
-          <span className="text-[8px] text-text-dark font-bold uppercase tracking-widest mb-1">Session P/L</span>
+          <span className="hidden md:inline text-[8px] text-text-dark font-bold uppercase tracking-widest mb-1">Session P/L</span>
           <div className="flex items-center gap-2">
             <span className={`text-xs font-heading font-black mono ${sessionPL >= 0 ? "text-neon-green" : "text-red-500"}`}>
               {sessionPL >= 0 ? "+" : ""}

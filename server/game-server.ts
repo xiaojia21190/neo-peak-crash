@@ -13,7 +13,9 @@
 import { config } from 'dotenv';
 config({ path: '.env.local' });
 
-import { createServer } from 'http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'http';
+import { fileURLToPath } from 'url';
+import { resolve } from 'path';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -33,6 +35,219 @@ let gateway: WebSocketGateway | null = null;
 let httpServer: ReturnType<typeof createServer> | null = null;
 
 let shutdownPromise: Promise<void> | null = null;
+
+const isMainModule = (() => {
+  // CommonJS
+  if (typeof require !== 'undefined' && typeof module !== 'undefined') {
+    return require.main === module;
+  }
+
+  // ESM
+  if (!process.argv[1]) return false;
+  try {
+    return fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+  } catch {
+    return false;
+  }
+})();
+
+type GatewayStatsPort = { getStats: () => any } | null;
+
+export function createRequestHandler(deps: { gateway: GatewayStatsPort; adminToken?: string }) {
+  return (req: IncomingMessage, res: ServerResponse) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+      }));
+      return;
+    }
+
+    if (req.url === '/stats') {
+      const adminToken = deps.adminToken;
+      const authHeaderValue = req.headers['authorization'];
+      const authHeader = Array.isArray(authHeaderValue) ? authHeaderValue[0] : authHeaderValue;
+
+      if (!adminToken) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'ADMIN_TOKEN is not configured' }));
+        return;
+      }
+
+      const providedToken = authHeader?.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : authHeader?.trim();
+
+      if (!providedToken || providedToken !== adminToken) {
+        res.writeHead(401, {
+          'Content-Type': 'application/json',
+          'WWW-Authenticate': 'Bearer',
+        });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+
+      const stats = deps.gateway?.getStats();
+      if (!stats) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Gateway not ready' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ...stats,
+        timestamp: new Date().toISOString(),
+      }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('Not Found');
+  };
+}
+
+type RecoverPrismaTransaction = {
+  bet: {
+    updateMany: (args: any) => Promise<{ count: number }>;
+  };
+};
+
+type RecoverPrismaClient = {
+  round: {
+    findMany: (args: any) => Promise<Array<{ id: string; status: string; startedAt: Date }>>;
+    update: (args: any) => Promise<unknown>;
+  };
+  bet: {
+    findMany: (args: any) => Promise<
+      Array<{
+        id: string;
+        orderId: string;
+        userId: string;
+        amount: unknown;
+        isPlayMode: boolean;
+        asset: string;
+      }>
+    >;
+  };
+  $transaction: <T>(fn: (tx: RecoverPrismaTransaction) => Promise<T>) => Promise<T>;
+};
+
+type RecoverFinancialService = {
+  changeBalance: (args: any, tx: RecoverPrismaTransaction) => Promise<unknown>;
+};
+
+type RecoverHousePoolService = {
+  applyDelta: (args: any, tx: RecoverPrismaTransaction) => Promise<unknown>;
+};
+
+export async function recoverOrphanedRounds(deps: {
+  prisma: RecoverPrismaClient;
+  financialService: RecoverFinancialService;
+  housePoolService: RecoverHousePoolService;
+}) {
+  const { prisma, financialService, housePoolService } = deps;
+
+  console.log('[Init] Checking for orphaned rounds...');
+  const orphanedRounds = await prisma.round.findMany({
+    where: {
+      status: {
+        in: ['BETTING', 'RUNNING', 'SETTLING'],
+      },
+    },
+    select: { id: true, status: true, startedAt: true },
+  });
+
+  if (orphanedRounds.length > 0) {
+    console.log(`[Init] Found ${orphanedRounds.length} orphaned rounds, cancelling and refunding...`);
+    for (const round of orphanedRounds) {
+      try {
+        await prisma.round.update({
+          where: { id: round.id },
+          data: {
+            status: 'CANCELLED',
+            endedAt: new Date(),
+          },
+        });
+
+        const pendingBets = await prisma.bet.findMany({
+          where: {
+            roundId: round.id,
+            status: { in: ['PENDING', 'SETTLING'] },
+          },
+          select: {
+            id: true,
+            orderId: true,
+            userId: true,
+            amount: true,
+            isPlayMode: true,
+            asset: true,
+          },
+        });
+
+        if (pendingBets.length > 0) {
+          console.log(`[Init][Recovery] Refunding ${pendingBets.length} unsettled bets for round ${round.id}`);
+
+          for (const bet of pendingBets) {
+            try {
+              await prisma.$transaction(async (tx) => {
+                const updated = await tx.bet.updateMany({
+                  where: {
+                    id: bet.id,
+                    status: { in: ['PENDING', 'SETTLING'] },
+                  },
+                  data: {
+                    status: 'REFUNDED',
+                    settledAt: new Date(),
+                  },
+                });
+
+                if (updated.count === 1) {
+                  await financialService.changeBalance(
+                    {
+                      userId: bet.userId,
+                      amount: Number(bet.amount),
+                      type: 'REFUND',
+                      isPlayMode: bet.isPlayMode,
+                      relatedBetId: bet.id,
+                      remark: `退款投注 ${bet.id}（回合 ${round.id} 已取消）`,
+                    },
+                    tx
+                  );
+
+                  if (!bet.isPlayMode) {
+                    try {
+                      await housePoolService.applyDelta(
+                        { asset: bet.asset, amount: -Number(bet.amount) },
+                        tx
+                      );
+                    } catch (error) {
+                      console.error(`[Init][Recovery] Failed to update house pool for refund bet ${bet.id}:`, error);
+                    }
+                  }
+                } else {
+                  console.log(`[Init] Bet ${bet.id} already refunded, skipping`);
+                }
+              });
+            } catch (error) {
+              console.error(`[Init][Recovery] Failed to refund bet ${bet.id}:`, error);
+            }
+          }
+
+          console.log(`[Init] ✓ Refunded ${pendingBets.length} bets for round ${round.id}`);
+        }
+
+        console.log(`[Init] ✓ Cancelled orphaned round ${round.id} (status: ${round.status})`);
+      } catch (error) {
+        console.error(`[Init] Failed to cancel orphaned round ${round.id}:`, error);
+      }
+    }
+  } else {
+    console.log('[Init] No orphaned rounds found');
+  }
+}
+
 
 async function main() {
   console.log('╔════════════════════════════════════════════╗');
@@ -78,61 +293,13 @@ async function main() {
 
   // 3. 创建 HTTP 服务器
   console.log('[Init] Creating HTTP server...');
-  httpServer = createServer((req, res) => {
-    // 健康检查端点
-    if (req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-      }));
-      return;
-    }
-
-    // 统计端点
-    if (req.url === '/stats') {
-      const adminToken = process.env.ADMIN_TOKEN;
-      const authHeaderValue = req.headers['authorization'];
-      const authHeader = Array.isArray(authHeaderValue) ? authHeaderValue[0] : authHeaderValue;
-
-      if (!adminToken) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'ADMIN_TOKEN is not configured' }));
-        return;
-      }
-
-      const providedToken = authHeader?.startsWith('Bearer ')
-        ? authHeader.slice('Bearer '.length).trim()
-        : authHeader?.trim();
-
-      if (!providedToken || providedToken !== adminToken) {
-        res.writeHead(401, {
-          'Content-Type': 'application/json',
-          'WWW-Authenticate': 'Bearer',
-        });
-        res.end(JSON.stringify({ error: 'Unauthorized' }));
-        return;
-      }
-
-      const stats = gateway?.getStats();
-      if (!stats) {
-        res.writeHead(503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Gateway not ready' }));
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        ...stats,
-        timestamp: new Date().toISOString(),
-      }));
-      return;
-    }
-
-    // 404
-    res.writeHead(404);
-    res.end('Not Found');
-  });
+  const statsGateway = { getStats: () => gateway?.getStats() };
+  httpServer = createServer(
+    createRequestHandler({
+      gateway: statsGateway,
+      adminToken: process.env.ADMIN_TOKEN,
+    })
+  );
 
   // 4. 初始化 WebSocket Gateway
   console.log('[Init] Initializing WebSocket Gateway...');
@@ -193,104 +360,7 @@ async function main() {
   });
 
   // 7. 处理启动时的孤儿回合
-  console.log('[Init] Checking for orphaned rounds...');
-  const orphanedRounds = await prisma.round.findMany({
-    where: {
-      status: {
-        in: ['BETTING', 'RUNNING', 'SETTLING'],
-      },
-    },
-    select: { id: true, status: true, startedAt: true },
-  });
-
-  if (orphanedRounds.length > 0) {
-    console.log(`[Init] Found ${orphanedRounds.length} orphaned rounds, cancelling and refunding...`);
-    for (const round of orphanedRounds) {
-      try {
-        // 1. 取消回合
-        await prisma.round.update({
-          where: { id: round.id },
-          data: {
-            status: 'CANCELLED',
-            endedAt: new Date(),
-          },
-        });
-
-        // 2. 查找该回合的所有 PENDING 投注
-        const pendingBets = await prisma.bet.findMany({
-          where: {
-            roundId: round.id,
-            status: { in: ['PENDING', 'SETTLING'] },
-          },
-          select: {
-            id: true,
-            orderId: true,
-            userId: true,
-            amount: true,
-            isPlayMode: true,
-            asset: true,
-          },
-        });
-
-        // 3. 退款
-        if (pendingBets.length > 0) {
-          console.log(`[Init][Recovery] Refunding ${pendingBets.length} unsettled bets for round ${round.id}`);
-
-          for (const bet of pendingBets) {
-            await prisma.$transaction(async (tx) => {
-              // 幂等性检查：使用 updateMany 确保只更新 PENDING 状态的投注
-              const updated = await tx.bet.updateMany({
-                where: {
-                  id: bet.id,
-                  status: { in: ['PENDING', 'SETTLING'] },
-                },
-                data: {
-                  status: 'REFUNDED',
-                  settledAt: new Date(),
-                },
-              });
-
-              // 只有成功更新1条记录才执行退款
-              if (updated.count === 1) {
-                await financialService.changeBalance(
-                  {
-                    userId: bet.userId,
-                    amount: Number(bet.amount),
-                    type: 'REFUND',
-                    isPlayMode: bet.isPlayMode,
-                    relatedBetId: bet.id,
-                    remark: `退款投注 ${bet.id}（回合 ${round.id} 已取消）`,
-                  },
-                  tx
-                );
-
-                if (!bet.isPlayMode) {
-                  try {
-                    await housePoolService.applyDelta(
-                      { asset: bet.asset, amount: -Number(bet.amount) },
-                      tx
-                    );
-                  } catch (error) {
-                    console.error(`[Init][Recovery] Failed to update house pool for refund bet ${bet.id}:`, error);
-                  }
-                }
-              } else {
-                console.log(`[Init] Bet ${bet.id} already refunded, skipping`);
-              }
-            });
-          }
-
-          console.log(`[Init] ✓ Refunded ${pendingBets.length} bets for round ${round.id}`);
-        }
-
-        console.log(`[Init] ✓ Cancelled orphaned round ${round.id} (status: ${round.status})`);
-      } catch (error) {
-        console.error(`[Init] Failed to cancel orphaned round ${round.id}:`, error);
-      }
-    }
-  } else {
-    console.log('[Init] No orphaned rounds found');
-  }
+  await recoverOrphanedRounds({ prisma: prismaInstance, financialService, housePoolService });
 
   // 8. 启动游戏引擎自动回合
   const gameEngine = gateway.getGameEngine();
@@ -396,27 +466,30 @@ async function shutdown(signal: string) {
   return shutdownPromise;
 }
 
-// 注册信号处理
-process.on('SIGINT', () => {
-  void shutdown('SIGINT');
-});
-process.on('SIGTERM', () => {
-  void shutdown('SIGTERM');
-});
 
-// 未捕获异常处理
-process.on('uncaughtException', (error) => {
-  console.error('[Fatal] Uncaught exception:', error);
-  void shutdown('uncaughtException');
-});
+if (isMainModule) {
+  // 注册信号处理
+  process.on('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
+  process.on('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[Fatal] Unhandled rejection at:', promise, 'reason:', reason);
-  void shutdown('unhandledRejection');
-});
+  // 未捕获异常处理
+  process.on('uncaughtException', (error) => {
+    console.error('[Fatal] Uncaught exception:', error);
+    void shutdown('uncaughtException');
+  });
 
-// 启动
-main().catch((error) => {
-  console.error('[Fatal] Failed to start server:', error);
-  process.exit(1);
-});
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Fatal] Unhandled rejection at:', promise, 'reason:', reason);
+    void shutdown('unhandledRejection');
+  });
+
+  // 启动
+  main().catch((error) => {
+    console.error('[Fatal] Failed to start server:', error);
+    process.exit(1);
+  });
+}

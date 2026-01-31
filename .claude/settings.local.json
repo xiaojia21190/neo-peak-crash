@@ -63,7 +63,10 @@
       "Bash(fi)",
       "Bash(pnpm test)",
       "Bash(npx tsx --test:*)",
-      "Bash(pnpm test:*)"
+      "Bash(pnpm test:*)",
+      "Bash(pnpm build)",
+      "Bash(git stash:*)",
+      "Bash(CODEX_BYPASS_SANDBOX=true codeagent-wrapper:*)"
     ]
   }
 }

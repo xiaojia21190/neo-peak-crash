@@ -97,7 +97,7 @@ export interface SettlementItem {
 
 export interface WSMessage {
   type: string;
-  payload: unknown;
+  payload?: unknown;
   timestamp: number;
   seq?: number;
 }

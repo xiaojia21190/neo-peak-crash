@@ -17,7 +17,7 @@ async function getFinancialService() {
   return cachedFinancialService;
 }
 
-type BalanceDeps = {
+export type BalanceDeps = {
   auth?: () => Promise<any>;
   getOrCreateUser?: typeof import("@/lib/services/user").getOrCreateUser;
   prismaClient?: typeof prisma;
@@ -54,8 +54,10 @@ export async function validateUserStatus(userId: string, prismaClient = prisma) 
   return null;
 }
 
-// 获取用户余额
-export async function GET(_request: NextRequest, deps: BalanceDeps = {}) {
+/**
+ * Internal handler with dependency injection support for testing
+ */
+export async function handleGetBalance(_request: NextRequest, deps: BalanceDeps = {}) {
   try {
     const auth = deps.auth ?? (await import("@/lib/auth")).auth;
     const getOrCreateUser = deps.getOrCreateUser ?? (await import("@/lib/services/user")).getOrCreateUser;
@@ -100,8 +102,10 @@ export async function GET(_request: NextRequest, deps: BalanceDeps = {}) {
   }
 }
 
-// 更新用户余额
-export async function POST(request: NextRequest, deps: BalanceDeps = {}) {
+/**
+ * Internal handler with dependency injection support for testing
+ */
+export async function handlePostBalance(request: NextRequest, deps: BalanceDeps = {}) {
   try {
     if (!validateSameOrigin(request)) {
       return NextResponse.json(
@@ -161,4 +165,18 @@ export async function POST(request: NextRequest, deps: BalanceDeps = {}) {
       { status: 500 }
     );
   }
+}
+
+/**
+ * Next.js Route Handler - GET /api/user/balance
+ */
+export async function GET(request: NextRequest) {
+  return handleGetBalance(request);
+}
+
+/**
+ * Next.js Route Handler - POST /api/user/balance
+ */
+export async function POST(request: NextRequest) {
+  return handlePostBalance(request);
 }

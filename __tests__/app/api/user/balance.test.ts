@@ -57,8 +57,8 @@ describe('User Balance Route', () => {
   }
 
   test('GET rejects unauthenticated user', async () => {
-    const { GET } = await routeModule;
-    const response = await GET({} as any, buildDeps({ auth: async () => null }));
+    const { handleGetBalance } = await routeModule;
+    const response = await handleGetBalance({} as any, buildDeps({ auth: async () => null }));
 
     assert.equal(response.status, 401);
     const payload = await response.json();
@@ -75,8 +75,8 @@ describe('User Balance Route', () => {
       playBalance: 0,
     });
 
-    const { GET } = await routeModule;
-    const response = await GET({} as any, buildDeps());
+    const { handleGetBalance } = await routeModule;
+    const response = await handleGetBalance({} as any, buildDeps());
 
     assert.equal(response.status, 403);
     const payload = await response.json();
@@ -93,8 +93,8 @@ describe('User Balance Route', () => {
       playBalance: 0,
     });
 
-    const { GET } = await routeModule;
-    const response = await GET(
+    const { handleGetBalance } = await routeModule;
+    const response = await handleGetBalance(
       {} as any,
       buildDeps({
         getOrCreateUser: async () => ({ ...defaultSnapshot, balance: 250 }),
@@ -119,8 +119,8 @@ describe('User Balance Route', () => {
 
     let receivedUsername: string | undefined;
 
-    const { GET } = await routeModule;
-    const response = await GET(
+    const { handleGetBalance } = await routeModule;
+    const response = await handleGetBalance(
       {} as any,
       buildDeps({
         auth: async () => ({ user: { id: 'user-1', name: null, image: null } }),
@@ -138,8 +138,8 @@ describe('User Balance Route', () => {
   test('GET returns 500 when user service throws', async () => {
     prismaMock.seedUser({ id: 'user-1', username: 'user-1', active: true, silenced: false });
 
-    const { GET } = await routeModule;
-    const response = await GET(
+    const { handleGetBalance } = await routeModule;
+    const response = await handleGetBalance(
       {} as any,
       buildDeps({
         getOrCreateUser: async () => {
@@ -154,8 +154,8 @@ describe('User Balance Route', () => {
   });
 
   test('POST rejects cross-origin request', async () => {
-    const { POST } = await routeModule;
-    const response = await POST(buildPostRequest({ action: 'reset_play_balance' }, 'http://evil.com'), buildDeps());
+    const { handlePostBalance } = await routeModule;
+    const response = await handlePostBalance(buildPostRequest({ action: 'reset_play_balance' }, 'http://evil.com'), buildDeps());
 
     assert.equal(response.status, 403);
     const payload = await response.json();
@@ -165,8 +165,8 @@ describe('User Balance Route', () => {
   test('POST rejects missing action', async () => {
     prismaMock.seedUser({ id: 'user-1', username: 'user-1', active: true, silenced: false });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildPostRequest({}, 'http://localhost:3000'), buildDeps());
+    const { handlePostBalance } = await routeModule;
+    const response = await handlePostBalance(buildPostRequest({}, 'http://localhost:3000'), buildDeps());
 
     assert.equal(response.status, 400);
     const payload = await response.json();
@@ -176,8 +176,8 @@ describe('User Balance Route', () => {
   test('POST resets play balance', async () => {
     prismaMock.seedUser({ id: 'user-1', username: 'user-1', active: true, silenced: false });
 
-    const { POST } = await routeModule;
-    const response = await POST(
+    const { handlePostBalance } = await routeModule;
+    const response = await handlePostBalance(
       buildPostRequest({ action: 'reset_play_balance' }, 'http://localhost:3000'),
       buildDeps({ setPlayBalance: async () => 4321 })
     );
@@ -190,8 +190,8 @@ describe('User Balance Route', () => {
   test('POST rejects update action', async () => {
     prismaMock.seedUser({ id: 'user-1', username: 'user-1', active: true, silenced: false });
 
-    const { POST } = await routeModule;
-    const response = await POST(buildPostRequest({ action: 'update' }, 'http://localhost:3000'), buildDeps());
+    const { handlePostBalance } = await routeModule;
+    const response = await handlePostBalance(buildPostRequest({ action: 'update' }, 'http://localhost:3000'), buildDeps());
 
     assert.equal(response.status, 403);
     const payload = await response.json();

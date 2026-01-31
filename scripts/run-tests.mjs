@@ -87,6 +87,16 @@ const mapTargetToTests = (target) => {
 };
 
 const coverageIncludes = [];
+const coverageExcludes = [
+  '__tests__/**',
+  'tests/**',
+  '**/*.test.ts',
+  '**/helpers/**',
+  '**/mocks/**',
+  '**/__mocks__/**',
+  'node_modules/**',
+  '.next/**'
+];
 let resolvedTargets = defaultTargets;
 if (testTargets.length > 0) {
   resolvedTargets = testTargets.map(mapTargetToTests);
@@ -107,8 +117,14 @@ if (testTargets.length > 0) {
   }
   for (const target of testTargets) {
     const normalized = normalizeTarget(target);
-    // When passing a test file under __tests__/lib/**, include the corresponding source file for coverage.
-    if (normalized.startsWith('__tests__/lib/') && normalized.endsWith('.test.ts')) {
+    // When passing a test file under __tests__/lib/**, __tests__/server/**, or __tests__/app/api/**,
+    // include the corresponding source file for coverage.
+    if (
+      normalized.endsWith('.test.ts') &&
+      (normalized.startsWith('__tests__/lib/') ||
+        normalized.startsWith('__tests__/server/') ||
+        normalized.startsWith('__tests__/app/api/'))
+    ) {
       coverageIncludes.push(normalized.replace(/^__tests__\//, '').replace(/\.test\.ts$/, '.ts'));
       continue;
     }
@@ -119,12 +135,17 @@ if (testTargets.length > 0) {
       coverageIncludes.push(normalized);
     }
   }
+} else {
+  coverageIncludes.push('lib/**/*.ts', 'app/api/**/*.ts', 'server/**/*.ts');
 }
 const coverageFlags = [];
 if (enableCoverage) {
   coverageFlags.push('--experimental-test-coverage');
   for (const include of coverageIncludes) {
     coverageFlags.push(`--test-coverage-include=${include}`);
+  }
+  for (const exclude of coverageExcludes) {
+    coverageFlags.push(`--test-coverage-exclude=${exclude}`);
   }
   if (coverageThresholds) {
     let parsed;

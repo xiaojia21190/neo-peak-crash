@@ -1,9 +1,10 @@
 /**
  * Bets API
- * GET - 鑾峰彇鎶曟敞鍘嗗彶
- * POST/PUT - 宸茬鐢紙浣跨敤 WebSocket GameEngine锛? */
+ * GET - 获取投注历史
+ * POST/PUT - 已禁用（使用 WebSocket GameEngine）
+ */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 
 export async function validateUserStatus(userId: string, prismaClient = prisma) {
@@ -36,14 +37,16 @@ export async function validateUserStatus(userId: string, prismaClient = prisma) 
   return null;
 }
 
-type BetsDeps = {
+export type BetsDeps = {
   auth?: () => Promise<any>;
   getUserBetHistory?: typeof import("@/lib/services/user").getUserBetHistory;
   prismaClient?: typeof prisma;
 };
 
-// 鑾峰彇鎶曟敞鍘嗗彶
-export async function GET(deps: BetsDeps = {}) {
+/**
+ * Internal handler with dependency injection support for testing
+ */
+export async function handleGetBets(_request: NextRequest, deps: BetsDeps = {}) {
   try {
     const auth = deps.auth ?? (await import("@/lib/auth")).auth;
     const getUserBetHistory = deps.getUserBetHistory ?? (await import("@/lib/services/user")).getUserBetHistory;
@@ -62,7 +65,7 @@ export async function GET(deps: BetsDeps = {}) {
     const history = await getUserBetHistory(session.user.id);
     return NextResponse.json({ bets: history });
   } catch (error) {
-    console.error("鑾峰彇鎶曟敞鍘嗗彶澶辫触:", error);
+    console.error("获取投注历史失败:", error);
     return NextResponse.json(
       { error: "获取投注历史失败" },
       { status: 500 }
@@ -70,7 +73,16 @@ export async function GET(deps: BetsDeps = {}) {
   }
 }
 
-// 涓嬫敞 - 宸茬鐢紙璇蜂娇鐢?WebSocket GameEngine.placeBet锛?
+/**
+ * Next.js Route Handler - GET /api/user/bets
+ */
+export async function GET(request: NextRequest) {
+  return handleGetBets(request);
+}
+
+/**
+ * Next.js Route Handler - POST /api/user/bets (disabled)
+ */
 export async function POST() {
   return NextResponse.json(
     { error: "此 API 已禁用，请使用 WebSocket GameEngine.placeBet()" },
@@ -78,7 +90,9 @@ export async function POST() {
   );
 }
 
-// 缁撶畻 - 宸茬鐢紙鐢辨湇鍔＄娓告垙寮曟搸澶勭悊锛?
+/**
+ * Next.js Route Handler - PUT /api/user/bets (disabled)
+ */
 export async function PUT() {
   return NextResponse.json(
     { error: "此 API 已禁用，请使用 WebSocket GameEngine.placeBet()" },

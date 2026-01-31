@@ -28,6 +28,7 @@ import {
   ERROR_CODES,
   MAX_ROW_INDEX,
   MAX_ROUND_PAYOUT,
+  MAX_SETTLEMENTS_PER_TICK,
 } from './constants';
 import {
   calculateRowIndex,
@@ -142,8 +143,8 @@ export class GameEngine extends EventEmitter {
    */
   async startRound(): Promise<void> {
     if (this.state?.status === 'RUNNING' ||
-        this.state?.status === 'BETTING' ||
-        this.state?.status === 'SETTLING') {
+      this.state?.status === 'BETTING' ||
+      this.state?.status === 'SETTLING') {
       throw new GameError(ERROR_CODES.NO_ACTIVE_ROUND, '鐎圭寮跺﹢渚€宕堕悙鍙夔€弶鈺傜椤㈡垶??');
     }
 
@@ -248,7 +249,7 @@ export class GameEngine extends EventEmitter {
    */
   async endRound(reason: 'timeout' | 'manual' | 'crash' = 'timeout'): Promise<void> {
     if (!this.state || this.state.status === 'SETTLING' ||
-        this.state.status === 'COMPLETED' || this.state.status === 'CANCELLED') {
+      this.state.status === 'COMPLETED' || this.state.status === 'CANCELLED') {
       return;
     }
 
@@ -379,7 +380,7 @@ export class GameEngine extends EventEmitter {
 
   async cancelRound(reason: string): Promise<void> {
     if (!this.state || this.state.status === 'SETTLING' ||
-        this.state.status === 'COMPLETED' || this.state.status === 'CANCELLED') {
+      this.state.status === 'COMPLETED' || this.state.status === 'CANCELLED') {
       return;
     }
 
@@ -1112,8 +1113,14 @@ export class GameEngine extends EventEmitter {
 
     const prevRow = this.state.prevRow ?? this.state.currentRow;
     const toSettle: SettlementItem[] = [];
+    let settledCount = 0;
 
     while (this.betHeap.length > 0) {
+      if (settledCount >= MAX_SETTLEMENTS_PER_TICK) {
+        // [Protection] Stop processing for this tick to prevent event loop starvation
+        break;
+      }
+
       const bet = this.betHeap[0];
 
       if (bet.targetTime > this.state.elapsed + HIT_TIME_TOLERANCE) break;
@@ -1124,6 +1131,7 @@ export class GameEngine extends EventEmitter {
           toSettle.push({ bet, isWin: false });
           this.decrementUserPendingBetCount(bet.userId);
           bet.status = 'SETTLING';
+          settledCount++;
         }
         continue;
       }
@@ -1147,6 +1155,7 @@ export class GameEngine extends EventEmitter {
             });
             this.decrementUserPendingBetCount(bet.userId);
             bet.status = 'SETTLING';
+            settledCount++;
           }
           continue;
         }
@@ -1203,10 +1212,10 @@ export class GameEngine extends EventEmitter {
         isWin,
         hitDetails: isWin
           ? {
-              hitPrice: this.state!.currentPrice,
-              hitRow: this.state!.currentRow,
-              hitTime: this.state!.elapsed,
-            }
+            hitPrice: this.state!.currentPrice,
+            hitRow: this.state!.currentRow,
+            hitTime: this.state!.elapsed,
+          }
           : undefined,
       });
     }

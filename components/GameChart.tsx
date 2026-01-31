@@ -472,7 +472,7 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
           d3.range(particleCount).map((i) => ({
             angle: (i / particleCount) * 2 * Math.PI,
             dist: 25 + Math.random() * 15, // Distance
-          }))
+          })),
         )
         .enter()
         .append("circle")
@@ -535,9 +535,7 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
         }))
         .filter((bet) => bet.x >= -100 && bet.x <= width + 100 && bet.y >= -50 && bet.y <= height + 50);
 
-      const betGroups = betsLayer
-        .selectAll<SVGGElement, typeof visibleBets[0]>(".bet-badge")
-        .data(visibleBets, (d) => `${d.timePoint}-${d.rowIndex}`);
+      const betGroups = betsLayer.selectAll<SVGGElement, (typeof visibleBets)[0]>(".bet-badge").data(visibleBets, (d) => `${d.timePoint}-${d.rowIndex}`);
 
       // Remove bets that are no longer visible
       betGroups.exit().remove();
@@ -547,24 +545,12 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
 
       // Create badge structure for new bets
       betEnter.append("rect").attr("class", "bet-glow");
-      const badge = betEnter.append("g").attr("class", "bet-label").attr("transform", `translate(0, ${-cellSize / 2}) scale(0.8)`);
-      badge
-        .append("rect")
-        .attr("class", "bet-bg")
-        .attr("x", -15)
-        .attr("y", -10)
-        .attr("width", 30)
-        .attr("height", 14)
-        .attr("rx", 2)
-        .attr("stroke-width", 1);
-      badge
-        .append("text")
-        .attr("class", "bet-text")
-        .attr("text-anchor", "middle")
-        .attr("y", 0)
-        .attr("font-weight", "bold")
-        .attr("font-size", "9px")
-        .attr("alignment-baseline", "middle");
+      const badge = betEnter
+        .append("g")
+        .attr("class", "bet-label")
+        .attr("transform", `translate(0, ${-cellSize / 2}) scale(0.8)`);
+      badge.append("rect").attr("class", "bet-bg").attr("x", -15).attr("y", -10).attr("width", 30).attr("height", 14).attr("rx", 2).attr("stroke-width", 1);
+      badge.append("text").attr("class", "bet-text").attr("text-anchor", "middle").attr("y", 0).attr("font-weight", "bold").attr("font-size", "9px").attr("alignment-baseline", "middle");
 
       // Update all bets (existing + new)
       const betUpdate = betGroups.merge(betEnter);
@@ -700,7 +686,7 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
                 .ease(d3.easeExpOut)
                 .attr("r", Math.max(width, height) * 0.5)
                 .attr("stroke-width", 0)
-                .remove()
+                .remove(),
             );
 
             // Text
@@ -744,10 +730,10 @@ const GameChart: React.FC<GameChartProps> = ({ gameEngineRef, onPlaceBet, roundH
   }, [gameEngineRef]);
 
   return (
-    <div className="w-full h-full bg-[#0d0d12] relative overflow-hidden select-none">
+    <div className="w-full h-full bg-[#0d0d12] relative overflow-hidden select-none touch-none">
       <svg ref={svgRef} className="w-full h-full"></svg>
       {/* Provably Fair / Server Seed UI Overlay */}
-      <div className="absolute top-6 left-6 pointer-events-none">
+      <div className="absolute top-6 left-6 pointer-events-none scale-75 origin-top-left sm:scale-100">
         <div className="bg-black/40 backdrop-blur-xl border border-white/5 px-4 py-2 rounded-xl shadow-2xl flex flex-col gap-1 group">
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>

@@ -1,3 +1,5 @@
+ignoredBuiltDependencies:
+  - esbuild
 onlyBuiltDependencies:
   - '@prisma/engines'
   - prisma

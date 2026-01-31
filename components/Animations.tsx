@@ -71,7 +71,7 @@ export function WinCelebration({ isActive, amount, multiplier, onComplete }: Win
     return (
       <div className="fixed inset-0 pointer-events-none z-200 flex items-center justify-center">
         {showAmount && (
-          <div className="bg-gradient-to-r from-emerald-600 to-emerald-500 px-8 py-4 rounded-2xl shadow-2xl shadow-emerald-500/50 backdrop-blur-sm">
+          <div className="bg-linear-to-r from-emerald-600 to-emerald-500 px-8 py-4 rounded-2xl shadow-2xl shadow-emerald-500/50 backdrop-blur-sm">
             <div className="text-center">
               <div className="text-white/80 text-sm font-heading font-bold mb-1">恭喜获胜！</div>
               <div className="text-white text-3xl font-heading font-black">+{amount.toFixed(2)} LDC</div>
@@ -106,7 +106,7 @@ export function WinCelebration({ isActive, amount, multiplier, onComplete }: Win
       {/* 金额显示 */}
       {showAmount && (
         <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-win-popup">
-          <div className="bg-gradient-to-r from-emerald-600 to-emerald-500 px-8 py-4 rounded-2xl shadow-2xl shadow-emerald-500/50 backdrop-blur-sm">
+          <div className="bg-linear-to-r from-emerald-600 to-emerald-500 px-8 py-4 rounded-2xl shadow-2xl shadow-emerald-500/50 backdrop-blur-sm">
             <div className="text-center">
               <div className="text-white/80 text-sm font-heading font-bold mb-1">恭喜获胜！</div>
               <div className="text-white text-3xl font-heading font-black">+{amount.toFixed(2)} LDC</div>

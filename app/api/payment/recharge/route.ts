@@ -19,7 +19,7 @@ function buildRechargeRateLimitKey(userId: string): string {
   return `rate:recharge:${userId}`;
 }
 
-type RechargeDeps = {
+export type RechargeDeps = {
   auth?: typeof auth;
   prismaClient?: typeof prisma;
   getRedisClient?: typeof getRedisClient;
@@ -28,7 +28,10 @@ type RechargeDeps = {
   validateSameOrigin?: typeof validateSameOrigin;
 };
 
-export async function POST(request: NextRequest, deps: RechargeDeps = {}) {
+/**
+ * Internal handler with dependency injection support for testing
+ */
+export async function handleRecharge(request: NextRequest, deps: RechargeDeps = {}) {
   try {
     const validateOrigin = deps.validateSameOrigin ?? validateSameOrigin;
     if (!validateOrigin(request)) {
@@ -213,4 +216,11 @@ export async function POST(request: NextRequest, deps: RechargeDeps = {}) {
       { status: 500 }
     );
   }
+}
+
+/**
+ * Next.js Route Handler - POST /api/payment/recharge
+ */
+export async function POST(request: NextRequest) {
+  return handleRecharge(request);
 }

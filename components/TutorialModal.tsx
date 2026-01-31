@@ -193,13 +193,13 @@ export function TutorialModal({ isOpen, onClose, houseEdge }: TutorialModalProps
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-100" onClick={handleClose} />
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-modal" onClick={handleClose} />
 
       {/* Modal */}
-      <div className="fixed inset-0 flex items-center justify-center z-101 p-4">
+      <div className="fixed inset-0 flex items-center justify-center z-modal-content p-4">
         <div className="bg-slate-900/95 backdrop-blur-xl border border-slate-700/50 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
           {/* Header */}
-          <div className="bg-gradient-to-r from-cta/20 to-purple-500/20 px-6 py-4 border-b border-slate-700/50">
+          <div className="bg-linear-to-r from-cta/20 to-purple-500/20 px-6 py-4 border-b border-slate-700/50">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-heading font-black text-white">{step.title}</h2>
               <button onClick={handleClose} className="text-slate-400 hover:text-white transition-colors duration-200 cursor-pointer">

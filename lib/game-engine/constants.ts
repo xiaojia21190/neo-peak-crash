@@ -31,6 +31,10 @@ export const DEFAULT_ROUND_CONFIG = {
   tickInterval: 16,        // 约 60fps
 } as const;
 
+// Maximum settlements processed per tick to prevent event loop starvation
+// Adjust based on performance testing - 500 provides good balance between throughput and responsiveness
+export const MAX_SETTLEMENTS_PER_TICK = 500;
+
 // Redis Key 前缀
 export const REDIS_KEYS = {
   ROUND_STATE: 'game:round:',       // game:round:{asset}
